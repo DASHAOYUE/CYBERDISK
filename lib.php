@@ -22,6 +22,12 @@ if (!function_exists('str_contains')) {
         return $needle === '' || strpos($haystack, $needle) !== false;
     }
 }
+if (!function_exists('str_ends_with')) {
+    function str_ends_with(string $haystack, string $needle): bool
+    {
+        return $needle === '' || substr($haystack, -strlen($needle)) === $needle;
+    }
+}
 
 if (is_file(__DIR__ . DIRECTORY_SEPARATOR . 'config.php')) {
     require __DIR__ . DIRECTORY_SEPARATOR . 'config.php';

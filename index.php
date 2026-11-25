@@ -50,8 +50,8 @@ a{color:var(--cyan)}
 .btn{background:rgba(0,240,255,.07);border:1px solid var(--line);color:var(--cyan);font-size:12px;
   letter-spacing:1px;padding:8px 16px;cursor:pointer;transition:.18s;user-select:none;white-space:nowrap}
 .btn:hover{background:rgba(0,240,255,.16);box-shadow:0 0 14px rgba(0,240,255,.4);text-shadow:0 0 8px rgba(0,240,255,.8)}
-.btn.primary{background:rgba(0,240,255,.18);border-color:var(--cyan);color:#0a1520;font-weight:700}
-.btn.primary:hover{background:var(--cyan);color:#020a10;box-shadow:0 0 22px rgba(0,240,255,.7)}
+.btn.primary{background:var(--cyan);border-color:var(--cyan);color:#020a10;font-weight:700}
+.btn.primary:hover{background:#33f6ff;color:#020a10;box-shadow:0 0 22px rgba(0,240,255,.7)}
 .btn.mag{border-color:rgba(255,46,196,.5);color:var(--magenta);background:rgba(255,46,196,.07)}
 .btn.mag:hover{background:rgba(255,46,196,.16);box-shadow:0 0 14px rgba(255,46,196,.4)}
 .btn.danger{border-color:rgba(255,56,96,.5);color:var(--danger);background:rgba(255,56,96,.07)}
@@ -151,6 +151,7 @@ tbody td{padding:9px 12px;font-size:13px}
 .b-zip{color:var(--gold);border-color:rgba(255,224,102,.4);background:rgba(255,224,102,.06)}
 .b-oth{color:var(--dim);border-color:rgba(95,127,158,.5)}
 .ops{display:flex;gap:5px;justify-content:flex-end;opacity:.45;transition:.15s}
+.ops .btn.btn-more{display:none}
 tr:hover .ops{opacity:1}
 .empty{padding:70px 20px;text-align:center;color:var(--dim);font-size:13px;letter-spacing:3px}
 .empty .e-ico{font-size:34px;color:rgba(0,240,255,.25);margin-bottom:14px}
@@ -292,6 +293,12 @@ body.music-on #upPanel{bottom:64px}
 .zlist tbody td{padding:7px 10px;border-bottom:1px solid rgba(0,240,255,.06);color:var(--text);word-break:break-all}
 .zlist tbody tr:hover{background:rgba(0,240,255,.05);box-shadow:none}
 .zlist tbody tr{cursor:default}
+.arc-note{margin-bottom:10px;padding:9px 12px;font-size:11px;line-height:1.8;border:1px dashed var(--line-dim);
+  background:rgba(0,240,255,.04);color:var(--text)}
+.arc-note.warn{border-color:rgba(255,179,71,.5);background:rgba(255,179,71,.06);color:var(--warn)}
+/* 行操作按钮：桌面显示图标+文字，窄屏只显示图标 */
+.op-i{margin-right:3px;font-style:normal}
+.op-t{font-style:normal}
 /* 预览 */
 #preview{position:fixed;inset:0;z-index:80;background:rgba(2,5,12,.9);backdrop-filter:blur(8px);
   display:none;align-items:center;justify-content:center}
@@ -326,6 +333,82 @@ body.music-on #upPanel{bottom:64px}
 @keyframes tin{from{transform:translateX(30px);opacity:0}}
 .hidden{display:none!important}
 @media (max-width:900px){ #sidebar{width:180px} .hide-md{display:none} }
+/* ===== 移动端适配（≤760px） ===== */
+@media (max-width:760px){
+  #mainView{padding:8px;gap:8px}
+  #topbar{flex-wrap:wrap;gap:8px;padding:8px 10px}
+  .brand{font-size:15px;letter-spacing:1px}
+  #storeBar{display:none}
+  #searchBox{order:5;flex-basis:100%;max-width:none}
+  .userbox{margin-left:auto;gap:6px}
+  .userbox .utag{display:none}
+  .userbox .uname{max-width:92px;overflow:hidden;text-overflow:ellipsis}
+  .userbox .btn{padding:5px 8px;font-size:11px;letter-spacing:0}
+  #body{flex-direction:column;gap:8px;min-height:0}
+  #sidebar{width:auto;flex:none;flex-direction:row;align-items:center;gap:4px;padding:6px;
+    overflow-x:auto;overflow-y:hidden}
+  #sidebar .nav-item{padding:8px 12px;font-size:12px;white-space:nowrap;flex:none}
+  #statsBlock,#sysBlock{display:none}
+  #toolbar{padding:8px;gap:6px}
+  #toolbar .tsep{display:none}
+  #toolbar .btn{padding:6px 9px;font-size:11px;letter-spacing:0}
+  #crumbs{order:9;flex-basis:100%;min-width:0;overflow-x:auto;font-size:12px;padding-top:2px}
+  #selInfo{order:10}
+  #content{padding:2px 2px 16px}
+  thead th{padding:8px 6px;font-size:9px;letter-spacing:1px}
+  tbody td{padding:7px 6px;font-size:12px}
+  #listWrap thead th:last-child{width:auto!important;min-width:0}
+  .fname{font-size:12px;max-width:98%}
+  .ops{gap:4px;opacity:1;flex-wrap:nowrap}
+  .ops .btn{display:none}
+  .ops .btn.ops-main{display:inline-flex;align-items:center;justify-content:center}
+  .ops .btn.btn-more{display:inline-flex}
+  .ops .btn.small{padding:8px 9px;font-size:13px;letter-spacing:0;min-width:34px;min-height:34px}
+  .ops .op-t{display:none}
+  .ops .op-i{margin:0}
+  #gridWrap{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;padding:2px}
+  .hide-sm{display:none!important}
+  #loginCard{padding:30px 20px 26px}
+  #loginCard .glitch{font-size:21px;letter-spacing:2px}
+  #loginCard .login-sub{letter-spacing:2px;margin-bottom:22px}
+  #loginFoot{font-size:9px;letter-spacing:1px}
+  #toasts{left:8px;right:8px;top:10px}
+  .toast{max-width:none;width:100%}
+  #upPanel{left:8px;right:8px;width:auto;bottom:8px;max-height:42vh;overflow-y:auto}
+  body.music-on #upPanel{bottom:60px}
+  #musicBar{gap:6px;padding:0 8px;height:46px}
+  .mb-info{min-width:0;max-width:80px;flex:1}
+  .mb-title{font-size:11px}
+  .mb-time{display:none}
+  .mb-track{min-width:56px;flex:2}
+  .mb-btn{padding:4px 6px;font-size:12px}
+  #musicListPanel{left:6px;right:6px;width:auto;bottom:52px;max-height:46vh}
+  #preview{padding:6px}
+  #pvBox{min-width:0;width:94vw;max-height:94vh;padding:10px}
+  #pvBox .pv-x{top:-6px;right:-6px}
+  .docview{max-width:94vw}
+  .docview .doc-body{min-width:0;padding:16px 14px;font-size:13px;line-height:1.7}
+  .xwrap{max-width:94vw;max-height:64vh}
+  .tabsbar{overflow-x:auto;flex-wrap:nowrap}
+  .pwrap{max-width:94vw;max-height:76vh}
+  #pvBox img,#pvBox video,#pvBox audio,#pvBox iframe{max-width:94vw;max-height:64vh}
+  .modal{width:94vw;max-height:90vh}
+  .modal.wide{width:94vw}
+  .modal .m-head{padding:12px 14px}
+  .modal .m-body{padding:14px}
+  .modal .m-foot{padding:10px 14px;gap:8px;flex-wrap:wrap}
+  .m-foot .btn{flex:1 1 auto}
+  .zlist{max-height:44vh}
+  #adminWrap{overflow-x:auto}
+  .perm-grid{grid-template-columns:1fr}
+  #dropMask .dz{width:86%;height:50%}
+  #dropMask .dz-t{font-size:15px;letter-spacing:4px}
+}
+@media (max-width:400px){
+  .mb-info{max-width:56px}
+  #toolbar .btn{padding:5px 7px;font-size:10px}
+  .brand{font-size:14px}
+}
 </style>
 </head>
 <body>
@@ -1061,7 +1144,7 @@ function catOf(isDir, name, mime){
   if((mime||'').startsWith('video/') || ['mp4','mkv','avi','mov','flv','webm','m4v'].includes(ext)) return ['b-vid','VID'];
   if((mime||'').startsWith('audio/') || ['mp3','wav','flac','aac','ogg','m4a'].includes(ext)) return ['b-aud','AUD'];
   if((mime||'').startsWith('text/') || ['pdf','doc','docx','xls','xlsx','ppt','pptx','md','txt','csv','html','php','json','xml','log'].includes(ext)) return ['b-doc','DOC'];
-  if(['zip','rar','7z','tar','gz'].includes(ext)) return ['b-zip','ZIP'];
+  if(['zip','rar','7z','tar','gz','tgz','bz2','tbz2','tbz'].includes(ext)) return ['b-zip',(ext.slice(0,4)||'ZIP').toUpperCase()];
   return ['b-oth',(ext.slice(0,4)||'BIN').toUpperCase()];
 }
 function imgUrl(id){ return 'download.php?id=' + id + '&inline=1'; }
@@ -1110,7 +1193,7 @@ function renderItems(){
       btn.addEventListener('click', ev=>{
         ev.stopPropagation();
         const op = btn.dataset.op;
-        if(op==='open'){ it.is_dir ? openDirById(it.id) : previewNode(it.id, it.name); }
+        if(op==='open'){ openOrPreview(it.id, it.is_dir?1:0); }
         else if(op==='dl'){ location.href = 'download.php?id='+it.id; toast('开始下载：'+it.name,'ok'); }
         else if(op==='pv'){ previewNode(it.id, it.name); }
         else if(op==='zip'){ zipHint(it.name); location.href='download.php?id='+it.id; }
@@ -1120,6 +1203,7 @@ function renderItems(){
         else if(op==='rename'){ openRename(it); }
         else if(op==='move'){ openMove([it.id]); }
         else if(op==='trash'){ trashNodes([it.id]); }
+        else if(op==='more'){ const r = btn.getBoundingClientRect(); openCtx({clientX: Math.min(r.left, innerWidth - 190), clientY: r.bottom + 4}, it); }
       });
     });
   });
@@ -1145,24 +1229,32 @@ function renderGrid(items){
   });
 }
 /* 行操作按钮（按权限过滤）：recent 视图只保留最小集 */
+const ARC_EXTS = ['zip','rar','7z','tar','tgz','gz','bz2','tbz','tbz2'];
+const FMT_LABEL = {zip:'ZIP', rar:'RAR', '7z':'7Z', tar:'TAR', tgz:'TAR.GZ', tbz2:'TAR.BZ2', gz:'GZ', bz2:'BZ2'};
+function extOf(n){ return (String(n).split('.').pop()||'').toLowerCase(); }
+function isArcName(n){ return ARC_EXTS.includes(extOf(n)); }
+function opBtn(op, ico, label, cls){
+  return `<button class="btn small${cls?' '+cls:''}" data-op="${op}"><span class="op-i">${ico}</span><span class="op-t">${label}</span></button>`;
+}
 function rowOpsHtml(it, isRecent){
   const ops = [];
-  const ext = (it.name.split('.').pop()||'').toLowerCase();
   if(it.is_dir){
-    ops.push('<button class="btn small" data-op="open">打开</button>');
-    if(!isRecent && hasPerm('download')) ops.push('<button class="btn small" data-op="zip">打包</button>');
+    ops.push(opBtn('open','▸','打开','ops-main'));
+    if(!isRecent && hasPerm('download')) ops.push(opBtn('zip','📦','打包'));
   } else {
-    if(hasPerm('download')) ops.push('<button class="btn small" data-op="dl">下载</button>');
-    if(!isRecent && ext==='zip' && hasPerm('preview')) ops.push('<button class="btn small" data-op="zipbrowse">浏览</button>');
-    if(!isRecent && ext==='zip' && hasPerm('upload')) ops.push('<button class="btn small" data-op="extract">解压</button>');
-    if(hasPerm('preview')) ops.push('<button class="btn small" data-op="pv">预览</button>');
+    const ext = extOf(it.name);
+    ops.push(opBtn('open','▸', hasPerm('preview')?'预览':'下载', 'ops-main'));
+    if(hasPerm('download')) ops.push(opBtn('dl','⬇','下载'));
+    if(!isRecent && isArcName(it.name) && hasPerm('preview')) ops.push(opBtn('zipbrowse','🗂','浏览'));
+    if(!isRecent && isArcName(it.name) && ext!=='7z' && hasPerm('upload')) ops.push(opBtn('extract','🗜','解压'));
   }
-  if(hasPerm('share')) ops.push('<button class="btn small mag" data-op="share">分享</button>');
+  if(hasPerm('share')) ops.push(opBtn('share','⇄','分享','mag'));
   if(!isRecent){
-    if(hasPerm('rename')) ops.push('<button class="btn small" data-op="rename">改名</button>');
-    if(hasPerm('move')) ops.push('<button class="btn small" data-op="move">移动</button>');
-    if(hasPerm('trash')) ops.push('<button class="btn small danger" data-op="trash">删除</button>');
+    if(hasPerm('rename')) ops.push(opBtn('rename','✎','改名'));
+    if(hasPerm('move')) ops.push(opBtn('move','⇢','移动'));
+    if(hasPerm('trash')) ops.push(opBtn('trash','✖','删除','danger'));
   }
+  ops.push(opBtn('more','⋯','更多','ops-main btn-more')); // 移动端收拢菜单入口
   return ops.join('');
 }
 function openOrPreview(id, isDir){
@@ -1188,7 +1280,7 @@ function fmtZipTime(ts){
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
 }
 async function zipBrowse(id, name){
-  openModal('ZIP / 压缩包内容', '<div class="pv-loading"><span class="spin"></span>READ // 正在读取压缩包目录…</div>',
+  openModal('压缩包 / 内容', '<div class="pv-loading"><span class="spin"></span>READ // 正在读取压缩包目录…</div>',
     '<button class="btn" onclick="closeModal()">关闭</button><button class="btn primary hidden" id="zbEx">🗜 解压…</button>');
   openWideModal();
   const r = await API.get('a=ziplist&id=' + id);
@@ -1196,23 +1288,33 @@ async function zipBrowse(id, name){
     $('#mBody').innerHTML = `<div style="color:var(--danger);font-size:13px;line-height:2">✖ ${esc(r.error||'读取失败')}</div>`;
     return;
   }
+  const label = FMT_LABEL[r.format] || 'ZIP';
+  $('#mTitle').textContent = label + ' / 压缩包内容';
   const rows = r.items.map(e=>{
     const icon = e.dir ? '<span style="color:var(--warn)">▸</span>' : '<span style="color:var(--cyan)">◈</span>';
     return `<tr><td>${icon} ${esc(e.name)}</td>
       <td class="dim" style="text-align:right;white-space:nowrap">${e.dir?'—':fmtSize(e.size)}</td>
-      <td class="dim" style="white-space:nowrap">${e.dir?'—':fmtZipTime(e.mtime)}</td></tr>`;
+      <td class="dim hide-sm" style="white-space:nowrap">${e.dir?'—':fmtZipTime(e.mtime)}</td></tr>`;
   }).join('');
+  const banner = (r.extractMode==='partial' || r.extractMode==='none') && r.extractNote
+    ? `<div class="arc-note warn">${esc(r.extractNote)}</div>` : '';
   $('#mBody').innerHTML = `
     <div style="font-size:11px;color:var(--dim);margin-bottom:10px;line-height:1.8">
-      ◈ <b style="color:var(--bright)">${esc(name)}</b> · 共 <b style="color:var(--cyan)">${r.total}</b> 项
+      ◈ <b style="color:var(--bright)">${esc(name)}</b> · 格式 <b style="color:var(--gold)">${label}</b> · 共 <b style="color:var(--cyan)">${r.total}</b> 项
       （文件夹 ${r.dirs} / 文件 ${r.files}）· 解压后约 <b style="color:var(--bright)">${fmtSize(r.uncompressed)}</b>
-      ${r.truncated ? `<br><span style="color:var(--warn)">条目较多，列表仅显示前 ${r.items.length} 项</span>` : ''}
+      ${r.truncated ? `<br><span style="color:var(--warn)">条目较多，仅列出前 ${r.items.length} 项</span>` : ''}
     </div>
+    ${banner}
     <div class="zlist"><table><thead><tr><th>名称 / 路径</th>
-      <th style="text-align:right;width:90px">大小</th><th style="width:130px">修改时间</th></tr></thead>
+      <th style="text-align:right;width:80px">大小</th><th class="hide-sm" style="width:120px">修改时间</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="3" class="dim">压缩包为空</td></tr>'}</tbody></table></div>`;
   const exBtn = $('#zbEx');
+  if(r.extractMode === 'none'){
+    exBtn.classList.add('hidden');
+    return;
+  }
   exBtn.classList.remove('hidden');
+  exBtn.textContent = r.extractMode === 'partial' ? '🗜 解压（仅存储条目）…' : '🗜 解压…';
   exBtn.onclick = ()=> zipExtractDialog(id, name, r);
 }
 async function openExtractFlow(id, name){
@@ -1222,27 +1324,40 @@ async function openExtractFlow(id, name){
   zipExtractDialog(id, name, r);
 }
 function zipExtractDialog(id, name, meta){
-  const base = (name.replace(/\.[^.]+$/,'') || '解压文件');
-  openModal('EXTRACT / 解压压缩包', `
+  const fmt = meta.format || 'zip';
+  const label = FMT_LABEL[fmt] || 'ZIP';
+  const single = (fmt === 'gz' || fmt === 'bz2');
+  const base = single ? name.replace(/\.(gz|bz2)$/i,'') : (name.replace(/\.[^.]+$/,'') || '解压文件');
+  const destBlock = single
+    ? `<div class="m-row"><label>DESTINATION / 解压位置</label>
+         <div style="font-size:13px;color:var(--text)">单文件压缩包 → 解压为「${esc(base)}」放入当前目录</div></div>`
+    : `<div class="m-row"><label>DESTINATION / 解压位置（当前目录）</label>
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:var(--text);letter-spacing:0;margin-bottom:9px;cursor:pointer">
+          <input type="radio" name="zxMode" value="folder" checked style="accent-color:#00f0ff">
+          解压到新建文件夹「${esc(base)}」（推荐）</label>
+        <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:var(--text);letter-spacing:0;cursor:pointer">
+          <input type="radio" name="zxMode" value="here" style="accent-color:#00f0ff">
+          直接解压到当前目录</label></div>`;
+  const notes = [
+    `· 解压会占用存储配额（约 ${fmtSize(meta.uncompressed)}，超出将拒绝执行）`,
+    '· 同名文件自动改名「name (2)」，不会覆盖现有文件',
+    '· macOS 资源目录 __MACOSX 与非法路径自动跳过',
+    '· 单次上限 20000 项 / 4GB'
+  ];
+  if (fmt === 'rar' && meta.extractMode === 'partial') {
+    notes.push('<b style="color:var(--warn)">· 当前服务器无 RAR 解压组件：仅「存储(不压缩)」条目可还原，压缩条目自动跳过</b>');
+  }
+  openModal('EXTRACT / 解压 · ' + label, `
     <div class="m-row"><label>SOURCE / 压缩包</label>
       <div style="font-size:13px;color:var(--bright);word-break:break-all">◈ ${esc(name)}
         <div class="dim" style="margin-top:4px">${meta.total} 项 · 解压后约 ${fmtSize(meta.uncompressed)}</div></div></div>
-    <div class="m-row"><label>DESTINATION / 解压位置（当前目录）</label>
-      <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:var(--text);letter-spacing:0;margin-bottom:9px;cursor:pointer">
-        <input type="radio" name="zxMode" value="folder" checked style="accent-color:#00f0ff">
-        解压到新建文件夹「${esc(base)}」（推荐）</label>
-      <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:var(--text);letter-spacing:0;cursor:pointer">
-        <input type="radio" name="zxMode" value="here" style="accent-color:#00f0ff">
-        直接解压到当前目录</label></div>
+    ${destBlock}
     <div style="font-size:10px;color:var(--dim);line-height:1.9;border:1px dashed var(--line-dim);padding:10px 12px;background:rgba(0,240,255,.03)">
-      · 解压会占用存储配额（约 ${fmtSize(meta.uncompressed)}，超出将拒绝执行）<br>
-      · 同名文件自动改名「name (2)」，不会覆盖现有文件<br>
-      · macOS 资源目录 __MACOSX 与非法路径自动跳过<br>
-      · 单次上限 20000 项 / 4GB
+      ${notes.join('<br>')}
     </div>`,
     `<button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="zxGo">开始解压</button>`);
   $('#zxGo').onclick = async ()=>{
-    const mode = document.querySelector('input[name=zxMode]:checked').value;
+    const mode = single ? 'here' : document.querySelector('input[name=zxMode]:checked').value;
     const btn = $('#zxGo');
     btn.disabled = true; btn.textContent = '解压中…';
     const r = await API.post('zipextract', {id, mode, parentId: state.dirId ?? 0});
@@ -1311,12 +1426,13 @@ function updateSelInfo(){
 function openCtx(e, it){
   const m = $('#ctxMenu');
   const isDir = it.is_dir;
-  const ext = (it.name.split('.').pop()||'').toLowerCase();
+  const ext = extOf(it.name);
+  const isArc = !isDir && isArcName(it.name);
   const items = [];
   items.push(`<div class="ci" data-c="open">⤷ ${isDir?'打开目录':(hasPerm('preview')?'预览':'下载')}</div>`);
   if(hasPerm('download')) items.push(`<div class="ci" data-c="dl">⬇ ${isDir?'打包下载':'下载'}</div>`);
-  if(!isDir && ext==='zip' && hasPerm('preview')) items.push(`<div class="ci" data-c="zipbrowse">🗂 浏览压缩包内容</div>`);
-  if(!isDir && ext==='zip' && hasPerm('upload')) items.push(`<div class="ci" data-c="extract">🗜 解压到…</div>`);
+  if(isArc && hasPerm('preview')) items.push(`<div class="ci" data-c="zipbrowse">🗂 浏览压缩包内容</div>`);
+  if(isArc && ext!=='7z' && hasPerm('upload')) items.push(`<div class="ci" data-c="extract">🗜 解压到…</div>`);
   if(hasPerm('share')) items.push(`<div class="ci" data-c="share">⇄ 创建分享</div>`);
   if(hasPerm('upload')) items.push(`<div class="ci" data-c="compress">📦 压缩为 ZIP</div>`);
   if(hasPerm('rename') || hasPerm('move')) items.push('<div class="cdiv"></div>');
@@ -1509,8 +1625,8 @@ function renderRecycle(){
       <td class="dim">${it.is_dir?'-':fmtSize(it.size)}</td>
       <td class="dim hide-md">${fmtTime(it.deleted_at)}</td>
       <td><div class="ops">
-        ${hasPerm('recycle') ? '<button class="btn small" data-op="restore">↩ 恢复</button>' : ''}
-        ${hasPerm('recycle') ? '<button class="btn small danger" data-op="purge">✖ 彻底删除</button>' : ''}</div></td>`;
+        ${hasPerm('recycle') ? '<button class="btn small ops-main" data-op="restore"><span class="op-i">↩</span><span class="op-t">恢复</span></button>' : ''}
+        ${hasPerm('recycle') ? '<button class="btn small danger ops-main" data-op="purge"><span class="op-i">✖</span><span class="op-t">彻底删除</span></button>' : ''}</div></td>`;
     tb.appendChild(tr);
     tr.querySelectorAll('button[data-op]').forEach(btn=>{
       btn.onclick = ()=>{
@@ -2156,7 +2272,7 @@ const pptxExts = ['pptx'];
 const legacyOfficeExts = ['doc','xls','ppt'];
 async function previewNode(id, name){
   const ext = (name.split('.').pop()||'').toLowerCase();
-  if(ext==='zip' && hasPerm('preview')){ zipBrowse(id, name); return; }
+  if(isArcName(name) && hasPerm('preview')){ zipBrowse(id, name); return; }
   const url = imgUrl(id);
   const box = $('#pvBox');
   let inner = '';

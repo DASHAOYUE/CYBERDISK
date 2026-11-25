@@ -492,28 +492,431 @@ if ($action === 'chunkabort') {
     cd_ok();
 }
 
-/* ========== 压缩包：浏览 / 解压 / 压缩打包 ========== */
+/* ========== 压缩包：浏览 / 解压 / 压缩打包 ==========
+ * 浏览（纯 PHP，不依赖任何组件）：ZIP / RAR(RAR3+RAR5) / 7Z / TAR / TAR.GZ / TGZ / TAR.BZ2 / GZ / BZ2
+ * 解压：ZIP、TAR 系完整解压；RAR 在无组件主机仅解“存储”条目（有 rar 扩展/unrar 时完整）；
+ *       7Z 仅浏览（LZMA 纯 PHP 不实现）。ZIP 打包创建保持不变。 */
 define('CD_ZIP_MAX_ENTRIES', 20000);        // 单次压缩/解压条目上限
 define('CD_ZIP_MAX_UNCOMPRESS', 4294967296); // 单次解压体积上限 4GB
 
-/** 压缩包文件校验：仅 ZIP、物理文件存在、服务器有 Zip 扩展，返回物理路径 */
-function cd_zip_guard(array $node): string
+/** 识别压缩包格式并做基本校验：返回 ['format' => ..., 'path' => 物理路径] */
+function cd_archive_guard(array $node): array
 {
     if ((int)$node['is_dir'] === 1) {
         cd_fail('请选择压缩包文件');
     }
-    $ext = strtolower(pathinfo((string)$node['name'], PATHINFO_EXTENSION));
-    if ($ext !== 'zip') {
-        cd_fail('仅支持 ZIP 格式压缩包');
+    $name = (string)$node['name'];
+    $lower = mb_strtolower($name);
+    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    $format = '';
+    if ($ext === 'zip') {
+        $format = 'zip';
+    } elseif ($ext === 'rar') {
+        $format = 'rar';
+    } elseif ($ext === '7z') {
+        $format = '7z';
+    } elseif ($ext === 'tar') {
+        $format = 'tar';
+    } elseif ($ext === 'tgz' || str_ends_with($lower, '.tar.gz')) {
+        $format = 'tgz';
+    } elseif ($ext === 'tbz2' || $ext === 'tbz' || str_ends_with($lower, '.tar.bz2')) {
+        $format = 'tbz2';
+    } elseif ($ext === 'gz') {
+        $format = 'gz';
+    } elseif ($ext === 'bz2') {
+        $format = 'bz2';
+    } else {
+        cd_fail('暂不支持该格式；目前可浏览 ZIP / RAR / 7Z / TAR / TAR.GZ / GZ 等常用压缩包');
     }
-    if (!class_exists('ZipArchive')) {
-        cd_fail('服务器缺少 Zip 扩展，无法处理压缩包');
+    if ($format === 'zip' && !class_exists('ZipArchive')) {
+        cd_fail('服务器缺少 Zip 扩展，无法处理 ZIP 压缩包');
+    }
+    if ($format === 'tgz' && !function_exists('gzopen')) {
+        cd_fail('服务器缺少 zlib 扩展，无法处理 TAR.GZ');
+    }
+    if (in_array($format, ['tbz2', 'bz2'], true) && !function_exists('bzopen')) {
+        cd_fail('服务器缺少 bz2 扩展，无法处理 BZ2 压缩包');
     }
     $path = cd_storage_path((int)$node['owner_id'], (string)$node['storage_name']);
     if (!is_file($path)) {
         cd_fail('压缩包数据已丢失', 404);
     }
-    return $path;
+    return ['format' => $format, 'path' => $path];
+}
+
+/** 解压能力说明（给前端展示）：full=完整解压，partial=部分可解压，none=仅浏览 */
+function cd_archive_extract_capability(string $format): array
+{
+    switch ($format) {
+        case 'zip':
+        case 'tar':
+        case 'tgz':
+        case 'tbz2':
+        case 'gz':
+        case 'bz2':
+            return ['mode' => 'full', 'note' => null];
+        case 'rar':
+            $backend = cd_rar_backend();
+            if ($backend === 'basic') {
+                return ['mode' => 'partial', 'note' =>
+                    '当前服务器没有 rar 扩展或 unrar 组件：可完整浏览；解压只能还原「存储（不压缩）」方式打包的条目，'
+                    . '其余条目会自动跳过。完整解压请下载后用 WinRAR / 7-Zip 打开，或让上传者改传 ZIP。'];
+            }
+            return ['mode' => 'full', 'note' => null];
+        default:
+            return ['mode' => 'none', 'note' =>
+                '7Z 使用 LZMA 系列压缩，纯 PHP 环境仅支持浏览内容；解压请下载后用 7-Zip / WinRAR 等工具完成。'];
+    }
+}
+
+/** 创建“解压目标”根目录节点：folder 模式新建文件夹，here 模式直接用当前目录 */
+function cd_archive_root(int $uid, ?int $parentId, string $mode, string $archiveName): array
+{
+    if ($mode !== 'folder') {
+        return [$parentId, null];
+    }
+    $base = pathinfo($archiveName, PATHINFO_FILENAME);
+    $base = preg_replace('/\.tar$/i', '', $base); // a.tar.gz → a
+    $base = cd_zip_seg($base === '' ? '解压文件' : $base);
+    $final = cd_unique_name($uid, $parentId, $base, true);
+    $now = date('Y-m-d H:i:s');
+    cd_db()->prepare('INSERT INTO cd_nodes (owner_id, parent_id, name, is_dir, size, created_at, updated_at)
+                      VALUES (?,?,?,1,0,?,?)')
+        ->execute([$uid, $parentId, $final, $now, $now]);
+    return [(int)cd_db()->lastInsertId(), $final];
+}
+
+/** 解压用：按需创建（或复用）目录节点，返回目录 id（$parent 为 null 表根） */
+function cd_archive_ensure_dir(int $uid, $parent, string $seg, array &$dirMap): int
+{
+    $clean = cd_zip_seg($seg);
+    $key = ($parent ?? 0) . '|' . mb_strtolower($clean);
+    if (isset($dirMap[$key])) {
+        return $dirMap[$key];
+    }
+    $pid = $parent === null ? null : (int)$parent;
+    $final = cd_unique_name($uid, $pid, $clean, true);
+    $now = date('Y-m-d H:i:s');
+    cd_db()->prepare('INSERT INTO cd_nodes (owner_id, parent_id, name, is_dir, size, created_at, updated_at)
+                      VALUES (?,?,?,1,0,?,?)')
+        ->execute([$uid, $pid, $final, $now, $now]);
+    $id = (int)cd_db()->lastInsertId();
+    $dirMap[$key] = $id;
+    return $id;
+}
+
+/** 递归删除临时目录（仅用于本程序自建的解压临时目录） */
+function cd_rrmdir(string $dir): void
+{
+    if (!is_dir($dir)) {
+        return;
+    }
+    foreach (scandir($dir) ?: [] as $n) {
+        if ($n === '.' || $n === '..') {
+            continue;
+        }
+        $p = $dir . DIRECTORY_SEPARATOR . $n;
+        if (is_dir($p) && !is_link($p)) {
+            cd_rrmdir($p);
+        } else {
+            @unlink($p);
+        }
+    }
+    @rmdir($dir);
+}
+
+/** 目录内是否有任何文件（含子目录），最多检查 20000 项 */
+function cd_dir_has_files(string $dir): bool
+{
+    if (!is_dir($dir)) {
+        return false;
+    }
+    $stack = [$dir];
+    $seen = 0;
+    while ($stack && $seen < 20000) {
+        $d = array_pop($stack);
+        foreach (scandir($d) ?: [] as $n) {
+            if ($n === '.' || $n === '..') {
+                continue;
+            }
+            $seen++;
+            if ($seen > 20000) break 2;
+            $p = $d . DIRECTORY_SEPARATOR . $n;
+            if (is_file($p)) {
+                return true;
+            }
+            if (is_dir($p)) {
+                $stack[] = $p;
+            }
+        }
+    }
+    return false;
+}
+
+/** 将临时目录中的解压结果导入网盘（供 CLI/PECL 解压路径复用） */
+function cd_archive_import_dir(int $uid, $rootDir, string $fsDir, int $quota, int $used, array &$st, array &$dirMap, int $depth = 0): void
+{
+    if ($depth > 64) {
+        return;
+    }
+    $items = @scandir($fsDir);
+    if (!$items) {
+        return;
+    }
+    // 先目录再文件
+    foreach ($items as $n) {
+        if ($n === '.' || $n === '..' || $n === '__MACOSX') {
+            continue;
+        }
+        $p = $fsDir . DIRECTORY_SEPARATOR . $n;
+        if (!is_dir($p)) {
+            continue;
+        }
+        if ($st['files'] >= CD_ZIP_MAX_ENTRIES) {
+            return;
+        }
+        $id = cd_archive_ensure_dir($uid, $rootDir, $n, $dirMap);
+        cd_archive_import_dir($uid, $id, $p, $quota, $used, $st, $dirMap, $depth + 1);
+    }
+    foreach ($items as $n) {
+        if ($n === '.' || $n === '..') {
+            continue;
+        }
+        $p = $fsDir . DIRECTORY_SEPARATOR . $n;
+        if (!is_file($p)) {
+            continue;
+        }
+        if ($st['files'] >= CD_ZIP_MAX_ENTRIES) {
+            return;
+        }
+        $size = (int)@filesize($p);
+        if ($size <= 0) {
+            $st['skipped']++;
+            continue;
+        }
+        if ($used + $st['bytes'] + $size > $quota) {
+            throw new RuntimeException('解压中途超出存储配额，已保留已解压部分');
+        }
+        $clean = cd_zip_seg($n);
+        $final = cd_unique_name($uid, $rootDir, $clean, false);
+        $ext = strtolower(pathinfo($clean, PATHINFO_EXTENSION));
+        $ext = preg_match('/^[a-z0-9]{1,10}$/', $ext) ? $ext : '';
+        $storageName = cd_random_hex(8) . '.' . ($ext !== '' ? $ext : 'bin');
+        $dst = cd_storage_path($uid, $storageName);
+        if (!@rename($p, $dst) && !@copy($p, $dst)) {
+            $st['skipped']++;
+            continue;
+        }
+        $mime = mime_content_type($dst) ?: 'application/octet-stream';
+        $now = date('Y-m-d H:i:s');
+        cd_db()->prepare('INSERT INTO cd_nodes (owner_id, parent_id, name, is_dir, size, mime, storage_name, created_at, updated_at)
+                          VALUES (?,?,?,0,?,?,?,?,?)')
+            ->execute([$uid, $rootDir, $final, $size, $mime, $storageName, $now, $now]);
+        $st['files']++;
+        $st['bytes'] += $size;
+    }
+}
+
+/* ---------- RAR 服务器能力探测（无组件也能浏览；解压分级） ---------- */
+function cd_proc_available(): bool
+{
+    if (!function_exists('proc_open')) {
+        return false;
+    }
+    $dis = array_map('trim', explode(',', (string)ini_get('disable_functions')));
+    return !in_array('proc_open', $dis, true);
+}
+
+/** 解析压缩包名称类文本（tar/rar 非 UTF-8 场景走 GBK/Big5 兜底） */
+function cd_archive_name(string $raw): string
+{
+    $raw = rtrim($raw, "\0");
+    if ($raw === '') {
+        return '';
+    }
+    if (@preg_match('//u', $raw) === 1) {
+        return $raw;
+    }
+    foreach (['GB18030', 'GBK', 'BIG5'] as $cs) {
+        $c = @iconv($cs, 'UTF-8//IGNORE', $raw);
+        if (is_string($c) && $c !== '' && @preg_match('//u', $c) === 1) {
+            return $c;
+        }
+    }
+    $out = @preg_replace('/[\x80-\xff]/', '?', $raw);
+    return is_string($out) && $out !== '' ? $out : '???';
+}
+
+/** RAR 解压通道：pecl（rar 扩展）> cli（unrar/7z/bsdtar）> basic（纯 PHP，仅存储条目） */
+function cd_rar_backend(): string
+{
+    static $b = null;
+    if ($b !== null) {
+        return $b;
+    }
+    if (defined('CD_ARCHIVE_CLI') && CD_ARCHIVE_CLI === false) {
+        return $b = 'basic';
+    }
+    if (class_exists('RarArchive')) {
+        return $b = 'pecl';
+    }
+    if (cd_proc_available() && cd_rar_cli_find() !== '') {
+        return $b = 'cli';
+    }
+    return $b = 'basic';
+}
+
+/** 查找可用的解压命令行组件（返回路径，未找到为空串） */
+function cd_rar_cli_find(): string
+{
+    static $found = null;
+    if ($found !== null) {
+        return $found;
+    }
+    $cands = [];
+    if (defined('CD_RAR_BIN') && CD_RAR_BIN) {
+        $cands[] = (string)CD_RAR_BIN;
+    }
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+        foreach ([getenv('ProgramW6432'), getenv('ProgramFiles'), getenv('ProgramFiles(x86)'), 'C:\\Program Files', 'C:\\Program Files (x86)'] as $base) {
+            if ($base) {
+                $cands[] = $base . '\\WinRAR\\UnRAR.exe';
+                $cands[] = $base . '\\7-Zip\\7z.exe';
+            }
+        }
+        $cands[] = 'C:\\Windows\\System32\\tar.exe'; // bsdtar（libarchive，可读 RAR）
+    } else {
+        foreach (['/usr/bin/unrar', '/usr/local/bin/unrar', '/usr/bin/7z', '/usr/local/bin/7z', '/usr/bin/7za', '/opt/homebrew/bin/7z', '/usr/bin/bsdtar'] as $p) {
+            $cands[] = $p;
+        }
+    }
+    foreach ($cands as $p) {
+        if ($p !== '' && @is_file($p)) {
+            return $found = $p;
+        }
+    }
+    return $found = '';
+}
+
+/** 用命令行组件把 RAR 解到临时目录（以 uploads 为工作目录 + 纯 ASCII 相对路径，规避中文路径/编码问题） */
+function cd_rar_cli_extract(int $uid, string $storageName, string $destAbs): string
+{
+    $bin = cd_rar_cli_find();
+    if ($bin === '') {
+        return '未找到解压组件';
+    }
+    if (!cd_proc_available()) {
+        return '服务器禁用了 proc_open';
+    }
+    if (!is_dir($destAbs)) {
+        @mkdir($destAbs, 0700, true);
+    }
+    $isWin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+    $sep = DIRECTORY_SEPARATOR;
+    $relArc = 'u' . $uid . $sep . $storageName;
+    $relDest = '.tmp' . $sep . basename($destAbs);
+    $lower = strtolower(basename($bin));
+    if (strpos($lower, 'unrar') !== false) {
+        $cmd = '"' . $bin . '" x -y -p- "' . $relArc . '" "' . $relDest . $sep . '"';
+    } elseif (strpos($lower, '7z') !== false) {
+        $cmd = '"' . $bin . '" x -y -p -- "' . $relArc . '" -o"' . $relDest . '"';
+    } else {
+        $cmd = '"' . $bin . '" -xf "' . $relArc . '" -C "' . $relDest . '"'; // bsdtar
+    }
+    $desc = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    $pipes = [];
+    $opts = $isWin ? ['bypass_shell' => true, 'suppress_errors' => true] : [];
+    $proc = @proc_open($cmd, $desc, $pipes, CD_UPLOAD_DIR, null, $opts);
+    if (!is_resource($proc)) {
+        return '无法启动解压组件';
+    }
+    foreach ([1, 2] as $i) {
+        if (isset($pipes[$i])) {
+            stream_set_blocking($pipes[$i], false);
+        }
+    }
+    $out = '';
+    $started = time();
+    $exit = null;
+    while (true) {
+        $status = proc_get_status($proc);
+        foreach ([1, 2] as $i) {
+            if (isset($pipes[$i]) && is_resource($pipes[$i])) {
+                $out .= (string)stream_get_contents($pipes[$i]);
+            }
+        }
+        if (!$status['running']) {
+            $exit = $status['exitcode'];
+            break;
+        }
+        if (time() - $started > 300) {
+            @proc_terminate($proc);
+            $exit = null;
+            break;
+        }
+        usleep(50000);
+    }
+    foreach ($pipes as $pp) {
+        if (is_resource($pp)) {
+            @fclose($pp);
+        }
+    }
+    @proc_close($proc);
+    if (($exit === 0 || $exit === 1) && cd_dir_has_files($destAbs)) {
+        return '';
+    }
+    $msg = trim((string)preg_replace('/\s+/u', ' ', $out));
+    if ($msg !== '' && @preg_match('//u', $msg) !== 1) {
+        $conv = @iconv('GB18030', 'UTF-8//IGNORE', $msg);
+        if (is_string($conv) && $conv !== '') {
+            $msg = $conv;
+        }
+    }
+    $msg = mb_substr($msg, -180);
+    return '解压组件失败（code=' . ($exit === null ? 'timeout' : $exit) . '）' . ($msg !== '' ? '：' . $msg : '');
+}
+
+/** 用 PECL rar 扩展把压缩包解到临时目录 */
+function cd_pecl_rar_extract(string $path, string $destAbs): string
+{
+    if (!class_exists('RarArchive')) {
+        return '无 rar 扩展';
+    }
+    try {
+        $rar = RarArchive::open($path);
+        if (!$rar) {
+            return '无法打开压缩包';
+        }
+        @$rar->setAllowBroken(true);
+        $entries = $rar->getEntries();
+        if (!$entries) {
+            $rar->close();
+            return '压缩包无条目';
+        }
+        foreach ($entries as $e) {
+            if ($e->isDirectory()) {
+                continue;
+            }
+            $name = str_replace('\\', '/', (string)$e->getName());
+            $segs = array_values(array_filter(explode('/', $name), function ($s) {
+                return $s !== '' && $s !== '.' && $s !== '..';
+            }));
+            if (!$segs) {
+                continue;
+            }
+            $rel = implode(DIRECTORY_SEPARATOR, array_map('cd_zip_seg', $segs));
+            $target = $destAbs . DIRECTORY_SEPARATOR . $rel;
+            @mkdir(dirname($target), 0700, true);
+            $ok = @$e->extract('', $target);
+            if (!$ok || !is_file($target)) {
+                @$e->extract(dirname($target), basename($target));
+            }
+        }
+        $rar->close();
+        return '';
+    } catch (Throwable $ex) {
+        return '扩展解压异常：' . $ex->getMessage();
+    }
 }
 
 /** 解压/压缩时清洗单个路径段（压缩包内名称不可信） */
@@ -530,11 +933,1099 @@ function cd_zip_seg(string $raw): string
     return mb_substr($s, 0, 200);
 }
 
-/** 读取压缩包条目目录（浏览用） */
-if ($action === 'ziplist') {
-    cd_require_perm($me, 'preview');
-    $node = cd_get_node($uid, (int)($_GET['id'] ?? 0));
-    $path = cd_zip_guard($node);
+/* ---------- RAR 浏览：纯 PHP 解析 RAR3/4 与 RAR5 头部（不依赖任何扩展/组件） ---------- */
+function cd_rar_vint_str(string $b, int &$p, bool &$ok): int
+{
+    $v = 0;
+    $shift = 0;
+    $len = strlen($b);
+    while ($p < $len) {
+        $c = ord($b[$p++]);
+        $v |= (($c & 0x7F) << $shift);
+        if (($c & 0x80) === 0) {
+            return $v;
+        }
+        $shift += 7;
+        if ($shift > 56) {
+            $ok = false;
+            return 0;
+        }
+    }
+    $ok = false;
+    return 0;
+}
+
+/** RAR3 DOS 时间 → Unix 时间戳 */
+function cd_rar_dostime(int $d): int
+{
+    if ($d <= 0) {
+        return 0;
+    }
+    $y = (($d >> 25) & 0x7F) + 1980;
+    $mo = ($d >> 21) & 0x0F;
+    $da = ($d >> 16) & 0x1F;
+    $h = ($d >> 11) & 0x1F;
+    $mi = ($d >> 5) & 0x3F;
+    $s = ($d & 0x1F) * 2;
+    if ($mo < 1 || $mo > 12 || $da < 1 || $da > 31) {
+        return 0;
+    }
+    $t = @mktime($h, $mi, $s, $mo, $da, $y);
+    return $t === false ? 0 : (int)$t;
+}
+
+/** RAR3 文件名：flag 0x200 时取 \0 前的 ANSI 部分，再按 UTF-8/GBK 兜底解码 */
+function cd_rar3_name(string $raw, int $flags): string
+{
+    if (($flags & 0x0200) !== 0) {
+        $z = strpos($raw, "\0");
+        if ($z !== false) {
+            $raw = substr($raw, 0, $z);
+        }
+    }
+    return cd_archive_name($raw);
+}
+
+/**
+ * 解析 RAR 条目。返回：
+ * ['entries'=>[['name','dir','size','mtime','store','enc','split','offset','packed']], 'total','dirs','files','uncompressed','items','truncated','compressed']
+ */
+function cd_rar_list(string $path): array
+{
+    $fh = @fopen($path, 'rb');
+    if (!$fh) {
+        cd_fail('压缩包无法打开', 404);
+    }
+    $fsize = (int)filesize($path);
+    $head = (string)fread($fh, 8);
+    $isRar5 = false;
+    $start = 0;
+    if (strlen($head) >= 8 && substr($head, 0, 8) === "Rar!\x1a\x07\x01\x00") {
+        $isRar5 = true;
+        $start = 8;
+    } elseif (strlen($head) >= 7 && substr($head, 0, 7) === "Rar!\x1a\x07\x00") {
+        $start = 7;
+    } else {
+        // 容忍尾部/前置数据：前 512KB 内找签名（如被改名/带壳）
+        fclose($fh);
+        $scan = (string)@file_get_contents($path, false, null, 0, min($fsize, 524288));
+        $p5 = strpos($scan, "Rar!\x1a\x07\x01\x00");
+        $p3 = strpos($scan, "Rar!\x1a\x07\x00");
+        if ($p5 !== false) {
+            $isRar5 = true;
+            $start = $p5 + 8;
+        } elseif ($p3 !== false) {
+            $start = $p3 + 7;
+        } else {
+            cd_fail('不是有效的 RAR 文件（可能不是 RAR 或已损坏）');
+        }
+        $fh = @fopen($path, 'rb');
+        if (!$fh) {
+            cd_fail('压缩包无法打开', 404);
+        }
+    }
+
+    $entries = [];
+    $dirs = 0;
+    $files = 0;
+    $uncompressed = 0;
+    $compressed = 0;
+    $truncated = false;
+
+    if (!$isRar5) {
+        /* ---- RAR 1.5~4.x（HEAD_FILE=0x74） ---- */
+        $firstType = null;
+        $pos = $start;
+        for ($guard = 0; $guard < 200000; $guard++) {
+            if ($pos + 7 > $fsize) {
+                break;
+            }
+            fseek($fh, $pos);
+            $h = (string)fread($fh, 7);
+            if (strlen($h) < 7) {
+                break;
+            }
+            $type = ord($h[2]);
+            $flags = (int)unpack('v', substr($h, 3, 2))[1];
+            $size = (int)unpack('v', substr($h, 5, 2))[1];
+            if ($size < 7) {
+                break;
+            }
+            if ($firstType === null) {
+                $firstType = $type;
+                if ($type !== 0x73) {
+                    break; // 首块必须是主头，否则视为头部加密/损坏
+                }
+            }
+            if ($type === 0x74 || $type === 0x7A || $type === 0x7B) {
+                $bodyLen = min($size - 7, $fsize - $pos - 7);
+                if ($bodyLen < 25) {
+                    break;
+                }
+                fseek($fh, $pos + 7);
+                $body = (string)fread($fh, $bodyLen);
+                if (strlen($body) < 25) {
+                    break;
+                }
+                $pack = (int)unpack('V', substr($body, 0, 4))[1];
+                $unp = (int)unpack('V', substr($body, 4, 4))[1];
+                $host = ord($body[8]);
+                $ftime = (int)unpack('V', substr($body, 13, 4))[1];
+                $method = ord($body[18]);
+                $nameSize = (int)unpack('v', substr($body, 19, 2))[1];
+                $attr = (int)unpack('V', substr($body, 21, 4))[1];
+                $p = 25;
+                $high = 0;
+                if (($flags & 0x0100) !== 0) {
+                    if (strlen($body) < 33) {
+                        break;
+                    }
+                    $high = (int)unpack('V', substr($body, 25, 4))[1];
+                    $p = 33;
+                }
+                $enc = ($flags & 0x0004) !== 0; // LHD_PASSWORD
+                if (($flags & 0x0400) !== 0) {
+                    $p += 8; // LHD_SALT
+                }
+                $rawName = substr($body, $p, max(0, min($nameSize, strlen($body) - $p)));
+                $packFull = $pack + ($high << 32);
+                if ($type === 0x74) {
+                    $name = str_replace('\\', '/', cd_rar3_name($rawName, $flags));
+                    $isDir = false;
+                    if ($host === 0 || $host === 1) {
+                        $isDir = ($attr & 0x10) !== 0;
+                    } else {
+                        $isDir = (($attr & 0xF000) === 0x4000);
+                    }
+                    if ($name !== '') {
+                        $split = ($flags & 0x0003) !== 0; // LHD_SPLIT_BEFORE/AFTER（LONG_BLOCK=0x8000 不算分卷）
+                        $store = ($method === 0x30) && !$split;
+                        if (!$isDir) {
+                            $files++;
+                            $uncompressed += $unp;
+                            if (!($store && !$enc)) {
+                                $compressed++;
+                            }
+                        } else {
+                            $dirs++;
+                        }
+                        if (count($entries) < CD_ZIP_MAX_ENTRIES) {
+                            $entries[] = [
+                                'name' => $isDir ? rtrim($name, '/') . '/' : $name,
+                                'dir' => $isDir,
+                                'size' => $isDir ? 0 : $unp,
+                                'mtime' => cd_rar_dostime($ftime),
+                                'store' => $store,
+                                'enc' => $enc,
+                                'split' => $split,
+                                'offset' => $pos + $size,
+                                'packed' => $packFull,
+                            ];
+                        } else {
+                            $truncated = true;
+                        }
+                    }
+                }
+                $pos = $pos + $size + $packFull;
+            } elseif ($type === 0x73) {
+                $pos += $size; // 主头（HighPosAv/PosAv 含在 size 内）
+            } elseif ($type === 0x7C) {
+                break; // HEAD_END
+            } else {
+                // 其他头：LONG_BLOCK 时跟随 4 字节附加数据长度（旧式注释/AV 等）
+                $add = 0;
+                if (($flags & 0x8000) !== 0) {
+                    fseek($fh, $pos + 7);
+                    $ab = (string)fread($fh, 4);
+                    if (strlen($ab) === 4) {
+                        $add = (int)unpack('V', $ab)[1];
+                    }
+                }
+                $pos += $size + $add;
+            }
+            if ($pos <= $start) {
+                break;
+            }
+        }
+        if ($firstType === null) {
+            fclose($fh);
+            cd_fail('RAR 内容解析失败：可能是加密头部或文件损坏');
+        }
+        if ($firstType !== 0x73) {
+            fclose($fh);
+            cd_fail('RAR 头部已加密（需密码才能列出内容），可下载后用 WinRAR / 7-Zip 打开');
+        }
+    } else {
+        /* ---- RAR 5.x ---- */
+        $firstType = null;
+        $pos = $start;
+        for ($guard = 0; $guard < 200000; $guard++) {
+            if ($pos + 5 > $fsize) {
+                break;
+            }
+            fseek($fh, $pos);
+            if (strlen((string)fread($fh, 4)) < 4) {
+                break;
+            }
+            $sz = 0;
+            $bytes = 0;
+            $okv = true;
+            while (true) {
+                $ch = fread($fh, 1);
+                if ($ch === '' || $ch === false) {
+                    $okv = false;
+                    break;
+                }
+                $b = ord($ch);
+                $bytes++;
+                if ($bytes > 8) {
+                    $okv = false;
+                    break;
+                }
+                $sz |= (($b & 0x7F) << (7 * ($bytes - 1)));
+                if (($b & 0x80) === 0) {
+                    break;
+                }
+            }
+            if (!$okv || $sz < 6 || $sz > 1048576) {
+                break;
+            }
+            $bodyStart = ftell($fh);
+            if ($bodyStart + $sz > $fsize) {
+                break;
+            }
+            $body = (string)fread($fh, $sz);
+            if (strlen($body) < $sz) {
+                break;
+            }
+            $bp = 0;
+            $okp = true;
+            $type = cd_rar_vint_str($body, $bp, $okp);
+            $hflags = $okp ? cd_rar_vint_str($body, $bp, $okp) : 0;
+            $extraSize = 0;
+            $dataSize = 0;
+            if ($okp && ($hflags & 0x0001)) {
+                $extraSize = cd_rar_vint_str($body, $bp, $okp);
+            }
+            if ($okp && ($hflags & 0x0002)) {
+                $dataSize = cd_rar_vint_str($body, $bp, $okp);
+            }
+            if (!$okp) {
+                break;
+            }
+            if ($firstType === null) {
+                $firstType = $type;
+                if ($type === 4) {
+                    break;
+                }
+                if ($type !== 1) {
+                    break;
+                }
+            }
+            if ($type === 2) {
+                $fileFlags = cd_rar_vint_str($body, $bp, $okp);
+                $unp = cd_rar_vint_str($body, $bp, $okp);
+                $attr = cd_rar_vint_str($body, $bp, $okp);
+                $mtime = 0;
+                if ($okp && ($fileFlags & 0x0002)) {
+                    if ($bp + 4 > strlen($body)) {
+                        break;
+                    }
+                    $mtime = (int)unpack('V', substr($body, $bp, 4))[1];
+                    $bp += 4;
+                }
+                if ($okp && ($fileFlags & 0x0004)) {
+                    $bp += 4;
+                }
+                $compInfo = cd_rar_vint_str($body, $bp, $okp);
+                $hostOS = cd_rar_vint_str($body, $bp, $okp);
+                $nameSize = cd_rar_vint_str($body, $bp, $okp);
+                if (!$okp || $bp + $nameSize > strlen($body)) {
+                    break;
+                }
+                $rawName = substr($body, $bp, $nameSize);
+                $bp += $nameSize;
+                $enc = false;
+                if ($extraSize > 0 && $bp < strlen($body)) {
+                    $pEnd = min(strlen($body), $bp + $extraSize);
+                    $p2 = $bp;
+                    while ($p2 < $pEnd - 1) {
+                        $rstart = $p2;
+                        $rs = cd_rar_vint_str($body, $p2, $okp);
+                        if (!$okp || $rs <= 0) {
+                            break;
+                        }
+                        $rt = cd_rar_vint_str($body, $p2, $okp);
+                        if (!$okp) {
+                            break;
+                        }
+                        if ($rt === 1) {
+                            $enc = true;
+                        }
+                        $p2 = $rstart + $rs;
+                    }
+                }
+                $name = str_replace('\\', '/', cd_archive_name($rawName));
+                $isDir = ($fileFlags & 0x0001) !== 0;
+                if ($name !== '') {
+                    $split = ($hflags & 0x0008) !== 0 || ($hflags & 0x0010) !== 0;
+                    $store = ((($compInfo >> 7) & 7) === 0) && !$split;
+                    if (!$isDir) {
+                        $files++;
+                        $uncompressed += $unp;
+                        if (!($store && !$enc)) {
+                            $compressed++;
+                        }
+                    } else {
+                        $dirs++;
+                    }
+                    if (count($entries) < CD_ZIP_MAX_ENTRIES) {
+                        $entries[] = [
+                            'name' => $isDir ? rtrim($name, '/') . '/' : $name,
+                            'dir' => $isDir,
+                            'size' => $isDir ? 0 : $unp,
+                            'mtime' => $mtime,
+                            'store' => $store,
+                            'enc' => $enc,
+                            'split' => $split,
+                            'offset' => $bodyStart + $sz,
+                            'packed' => $dataSize,
+                        ];
+                    } else {
+                        $truncated = true;
+                    }
+                }
+            }
+            $pos = $bodyStart + $sz + $dataSize;
+            if ($type === 5) {
+                break; // END
+            }
+            if ($pos <= $start) {
+                break;
+            }
+        }
+        if ($firstType === null || $firstType !== 1) {
+            fclose($fh);
+            cd_fail('RAR 头部已加密或格式异常，无法列出内容（可下载后用 WinRAR / 7-Zip 打开）');
+        }
+    }
+    fclose($fh);
+
+    if (!$entries && $files === 0 && $dirs === 0) {
+        cd_fail('RAR 内容为空或解析失败');
+    }
+    $items = [];
+    foreach ($entries as $e) {
+        if (count($items) < 3000) {
+            $items[] = ['name' => $e['name'], 'dir' => $e['dir'], 'size' => $e['size'], 'mtime' => $e['mtime']];
+        }
+    }
+    usort($items, function ($a, $b) {
+        if ($a['dir'] !== $b['dir']) {
+            return $a['dir'] ? -1 : 1;
+        }
+        return strnatcasecmp($a['name'], $b['name']);
+    });
+    return [
+        'entries' => $entries,
+        'total' => (int)count($entries),
+        'dirs' => $dirs,
+        'files' => $files,
+        'uncompressed' => $uncompressed,
+        'items' => $items,
+        'truncated' => $truncated,
+        'compressed' => $compressed,
+    ];
+}
+
+/* ---------- TAR / TAR.GZ / TAR.BZ2 解析（纯 PHP，流式） ---------- */
+function cd_tar_open(string $path, ?string $comp): array
+{
+    if ($comp === 'gz') {
+        $fp = @gzopen($path, 'rb');
+        if (!$fp) {
+            cd_fail('TAR.GZ 打开失败');
+        }
+        return ['kind' => 'gz', 'fp' => $fp];
+    }
+    if ($comp === 'bz2') {
+        $fp = @bzopen($path, 'r');
+        if (!$fp) {
+            cd_fail('TAR.BZ2 打开失败');
+        }
+        return ['kind' => 'bz2', 'fp' => $fp];
+    }
+    $fp = @fopen($path, 'rb');
+    if (!$fp) {
+        cd_fail('压缩包无法打开', 404);
+    }
+    return ['kind' => 'plain', 'fp' => $fp];
+}
+
+function cd_tar_read(array $s, int $len): string
+{
+    $out = '';
+    while (strlen($out) < $len) {
+        $chunk = min($len - strlen($out), 65536);
+        if ($s['kind'] === 'gz') {
+            $buf = @gzread($s['fp'], $chunk);
+        } elseif ($s['kind'] === 'bz2') {
+            $buf = @bzread($s['fp'], $chunk);
+        } else {
+            $buf = @fread($s['fp'], $chunk);
+        }
+        if ($buf === false || $buf === '') {
+            break;
+        }
+        $out .= $buf;
+    }
+    return $out;
+}
+
+function cd_tar_skip(array $s, int $len): void
+{
+    if ($len <= 0) {
+        return;
+    }
+    if ($s['kind'] === 'plain') {
+        fseek($s['fp'], $len, SEEK_CUR);
+        return;
+    }
+    if ($s['kind'] === 'gz') {
+        @gzseek($s['fp'], $len, SEEK_CUR);
+        return;
+    }
+    while ($len > 0) {
+        $b = @bzread($s['fp'], min($len, 65536));
+        if ($b === false || $b === '') {
+            break;
+        }
+        $len -= strlen($b);
+    }
+}
+
+function cd_tar_close(array $s): void
+{
+    if ($s['kind'] === 'gz') {
+        @gzclose($s['fp']);
+    } elseif ($s['kind'] === 'bz2') {
+        @bzclose($s['fp']);
+    } else {
+        @fclose($s['fp']);
+    }
+}
+
+/** 解析 512 字节 TAR 头（含 ustar 前缀与 GNU base-256 尺寸） */
+function cd_tar_hdr(string $blk): ?array
+{
+    if (strlen($blk) < 512 || trim($blk, "\0") === '') {
+        return null;
+    }
+    $name = rtrim(substr($blk, 0, 100), "\0");
+    $prefix = rtrim(substr($blk, 345, 155), "\0");
+    if ($prefix !== '') {
+        $name = $prefix . '/' . $name;
+    }
+    $size = 0;
+    $sizeRaw = substr($blk, 124, 12);
+    if ($sizeRaw !== '' && ord($sizeRaw[0]) >= 0x80) {
+        for ($i = 1; $i < 12; $i++) {
+            $size = ($size << 8) | ord($sizeRaw[$i]); // base-256
+        }
+    } else {
+        $sz = trim($sizeRaw, " \0");
+        $size = $sz === '' ? 0 : (int)octdec($sz);
+    }
+    $mt = trim(substr($blk, 136, 12), " \0");
+    return [
+        'name' => $name,
+        'size' => $size,
+        'mtime' => $mt === '' ? 0 : (int)octdec($mt),
+        'type' => substr($blk, 156, 1),
+    ];
+}
+
+/** 遍历 TAR：$onEntry(name, isDir, size, mtime, headerBlock, stream) 返回 false 可提前结束；$onData 读取条目内容 */
+/**
+ * 遍历 TAR：$onEntry(name, isDir, size, mtime, ?reader) —— 文件条目可用 $reader(n) 读取内容；
+ * 回调返回 false 提前结束。读取未消费的数据与 512 对齐填充由遍历器自动跳过。
+ */
+function cd_tar_walk(string $path, ?string $comp, callable $onEntry): void
+{
+    $s = cd_tar_open($path, $comp);
+    $pending = null;
+    $paxPath = null;
+    $paxMtime = null;
+    for ($guard = 0; $guard < 400000; $guard++) {
+        $blk = cd_tar_read($s, 512);
+        if (strlen($blk) < 512) {
+            break;
+        }
+        if (trim($blk, "\0") === '') {
+            break; // 结束块
+        }
+        $h = cd_tar_hdr($blk);
+        if ($h === null) {
+            break;
+        }
+        $type = $h['type'];
+        $size = $h['size'];
+        $pad = (512 - ($size % 512)) % 512;
+        if ($type === 'L') { // GNU 长文件名
+            $pending = rtrim(cd_tar_read($s, $size), "\0\n\r");
+            cd_tar_skip($s, $pad);
+            continue;
+        }
+        if ($type === 'K') {
+            cd_tar_skip($s, $size + $pad);
+            continue;
+        }
+        if ($type === 'x' || $type === 'g') { // pax 扩展头
+            $data = cd_tar_read($s, $size);
+            cd_tar_skip($s, $pad);
+            if ($type === 'x') {
+                if (preg_match('/(?:^|\n)\d+ path=(.*)/', $data, $m)) {
+                    $paxPath = $m[1];
+                }
+                if (preg_match('/(?:^|\n)\d+ mtime=(\d+)/', $data, $m2)) {
+                    $paxMtime = (int)$m2[1];
+                }
+            }
+            continue;
+        }
+        $name = $h['name'];
+        if ($pending !== null) {
+            $name = $pending;
+            $pending = null;
+        }
+        if ($paxPath !== null) {
+            $name = $paxPath;
+            $paxPath = null;
+        }
+        $mtime = $paxMtime !== null ? $paxMtime : $h['mtime'];
+        $paxMtime = null;
+        $name = str_replace('\\', '/', cd_archive_name($name));
+        $name = preg_replace('#^(?:\./)+#', '', $name);
+        $isDir = ($type === '5') || substr($name, -1) === '/';
+        $cleanName = rtrim($name, '/');
+        if ($cleanName === '' || $cleanName === '.') {
+            cd_tar_skip($s, $size + $pad); // 根目录条目
+            continue;
+        }
+        if ($isDir) {
+            if ($onEntry($cleanName, true, 0, $mtime, null) === false) {
+                break;
+            }
+            continue;
+        }
+        $isFile = ($type === '0' || $type === "\0" || $type === '7');
+        if (!$isFile) { // 链接/设备等特殊条目：跳过
+            cd_tar_skip($s, $size + $pad);
+            continue;
+        }
+        $remaining = $size;
+        $reader = function (int $want) use (&$remaining, $s): string {
+            $take = min($want, $remaining);
+            if ($take <= 0) {
+                return '';
+            }
+            $buf = cd_tar_read($s, $take);
+            $remaining -= strlen($buf);
+            return $buf;
+        };
+        $go = $onEntry($cleanName, false, $size, $mtime, $reader);
+        cd_tar_skip($s, $remaining + $pad); // 未消费内容 + 对齐填充
+        if ($go === false) {
+            break;
+        }
+    }
+    cd_tar_close($s);
+}
+
+function cd_tar_list(string $path, ?string $comp): array
+{
+    $dirs = 0;
+    $files = 0;
+    $uncompressed = 0;
+    $entries = [];
+    $truncated = false;
+    cd_tar_walk($path, $comp, function (string $name, bool $isDir, int $size, int $mtime, $reader) use (&$entries, &$dirs, &$files, &$uncompressed, &$truncated) {
+        if (count($entries) >= CD_ZIP_MAX_ENTRIES) {
+            $truncated = true;
+            return false;
+        }
+        if ($isDir) {
+            $dirs++;
+            $entries[] = ['name' => $name . '/', 'dir' => true, 'size' => 0, 'mtime' => $mtime];
+        } else {
+            $files++;
+            $uncompressed += $size;
+            $entries[] = ['name' => $name, 'dir' => false, 'size' => $size, 'mtime' => $mtime];
+        }
+        return true;
+    });
+    if (!$entries && $files === 0 && $dirs === 0) {
+        cd_fail('TAR 内容为空或解析失败');
+    }
+    $items = array_slice($entries, 0, 3000);
+    usort($items, function ($a, $b) {
+        if ($a['dir'] !== $b['dir']) {
+            return $a['dir'] ? -1 : 1;
+        }
+        return strnatcasecmp($a['name'], $b['name']);
+    });
+    return [
+        'total' => count($entries),
+        'dirs' => $dirs,
+        'files' => $files,
+        'uncompressed' => $uncompressed,
+        'items' => $items,
+        'truncated' => $truncated,
+        'compressed' => 0,
+    ];
+}
+
+/* ---------- 单文件 GZ / BZ2：浏览为“1 个条目” ---------- */
+function cd_single_list(string $path, string $format, string $nodeName): array
+{
+    $size = 0;
+    $mtime = 0;
+    if ($format === 'gz') {
+        $fp = @fopen($path, 'rb');
+        if ($fp) {
+            fseek($fp, -8, SEEK_END);
+            $tail = (string)fread($fp, 8);
+            if (strlen($tail) === 8) {
+                $mtime = (int)unpack('V', substr($tail, 0, 4))[1];
+                $size = (int)unpack('V', substr($tail, 4, 4))[1]; // ISIZE（超 4GB 时为余数）
+            }
+            fclose($fp);
+        }
+    }
+    $inner = preg_replace('/\.(gz|bz2)$/i', '', $nodeName);
+    if ($inner === '' || $inner === null) {
+        $inner = '解压文件';
+    }
+    $items = [['name' => $inner, 'dir' => false, 'size' => $size, 'mtime' => $mtime]];
+    return [
+        'total' => 1,
+        'dirs' => 0,
+        'files' => 1,
+        'uncompressed' => $size,
+        'items' => $items,
+        'truncated' => false,
+        'compressed' => 0,
+    ];
+}
+
+/* ---------- 7Z 浏览：纯 PHP 解析 7z 头部（含文件夹/子流/名称/时间） ---------- */
+function cd_7z_list(string $path): array
+{
+    $fp = @fopen($path, 'rb');
+    if (!$fp) {
+        cd_fail('压缩包无法打开', 404);
+    }
+    $fsize = (int)filesize($path);
+    $start = (string)fread($fp, 32);
+    if (strlen($start) < 32 || substr($start, 0, 6) !== "7z\xBC\xAF\x27\x1C") {
+        fclose($fp);
+        cd_fail('不是有效的 7Z 文件');
+    }
+    $nextOff = (int)unpack('P', substr($start, 12, 8))[1];
+    $nextSize = (int)unpack('P', substr($start, 20, 8))[1];
+    if ($nextSize <= 0 || $nextSize > 67108864 || 32 + $nextOff + $nextSize > $fsize) {
+        fclose($fp);
+        cd_fail('7Z 头部异常或文件不完整');
+    }
+    fseek($fp, 32 + $nextOff);
+    $hdr = (string)fread($fp, $nextSize);
+    fclose($fp);
+    if (strlen($hdr) < $nextSize) {
+        cd_fail('7Z 头部读取不完整');
+    }
+
+    $n = strlen($hdr);
+    $p = 0;
+    $ok = true;
+    $rb = function () use (&$p, $n, &$ok, $hdr): int {
+        if ($p >= $n) {
+            $ok = false;
+            return 0;
+        }
+        return ord($hdr[$p++]);
+    };
+    $rn = function () use (&$p, $n, &$ok, $hdr): int {
+        if ($p >= $n) {
+            $ok = false;
+            return 0;
+        }
+        $first = ord($hdr[$p++]);
+        $mask = 0x80;
+        $value = 0;
+        for ($i = 0; $i < 8; $i++) {
+            if (($first & $mask) === 0) {
+                $value |= (($first & ($mask - 1)) << (8 * $i));
+                return $value;
+            }
+            if ($p >= $n) {
+                $ok = false;
+                return 0;
+            }
+            $value |= (ord($hdr[$p++]) << (8 * $i));
+            $mask >>= 1;
+        }
+        return $value;
+    };
+    $rbytes = function (int $len) use (&$p, $n, &$ok, $hdr): string {
+        if ($len < 0 || $p + $len > $n) {
+            $ok = false;
+            return '';
+        }
+        $s = substr($hdr, $p, $len);
+        $p += $len;
+        return $s;
+    };
+    /** BoolVector2：AllAreDefined 字节 + （非全定义时）MSB 位向量 */
+    $vec2 = function (int $count) use ($rb, $rbytes, &$ok): array {
+        $bits = [];
+        if ($count <= 0) {
+            return $bits;
+        }
+        $all = $rb();
+        if ($all) {
+            for ($i = 0; $i < $count; $i++) {
+                $bits[$i] = true;
+            }
+            return $bits;
+        }
+        $need = (int)(($count + 7) >> 3);
+        $data = $rbytes($need);
+        for ($i = 0; $i < $count; $i++) {
+            $byte = ord($data[$i >> 3] ?? "\0");
+            $bits[$i] = (($byte >> (7 - ($i & 7))) & 1) === 1;
+        }
+        return $bits;
+    };
+
+    // 主头
+    $id = $rb();
+    if ($id === 0x17) { // kEncodedHeader：目录头经 LZMA 压缩
+        cd_fail('该 7Z 的目录头经过压缩（7-Zip 默认设置），纯 PHP 环境无法直接列出内容；'
+            . '可下载后用 7-Zip / WinRAR 打开，或用 7-Zip 以「-mhc=off」重建后上传');
+    }
+    if ($id !== 0x01) {
+        cd_fail('7Z 头部解析失败');
+    }
+
+    $numFiles = 0;
+    $names = [];
+    $mtimes = [];
+    $emptyStream = [];
+    $emptyFile = [];
+    $folderOuts = [];   // 每个 folder 的输出流数
+    $outSizes = [];     // 全部输出流尺寸（按 folder 顺序）
+    $numStreams = [];   // 每个 folder 的子流数
+    $streamSizes = [];  // 展平后的子流尺寸（按文件顺序，仅含真实数据流）
+
+    while ($ok) {
+        $prop = $rb();
+        if (!$ok || $prop === 0x00) {
+            break;
+        }
+        if ($prop === 0x02) { // kArchiveProperties
+            while ($ok) {
+                $pid = $rb();
+                if (!$ok || $pid === 0x00) {
+                    break;
+                }
+                $sz = $rn();
+                $rbytes($sz);
+            }
+            continue;
+        }
+        if ($prop === 0x03) { // kAdditionalStreamsInfo
+            cd_fail('该 7Z 包含附加流（常用于存储特殊属性），暂不支持在线浏览');
+        }
+        if ($prop === 0x04) { // kMainStreamsInfo
+            while ($ok) {
+                $sid = $rb();
+                if (!$ok || $sid === 0x00) {
+                    break;
+                }
+                if ($sid === 0x06) { // kPackInfo
+                    $rn(); // PackPos
+                    $numPack = $rn();
+                    while ($ok) {
+                        $pid = $rb();
+                        if (!$ok || $pid === 0x00) {
+                            break;
+                        }
+                        if ($pid === 0x09) { // kSize
+                            for ($i = 0; $i < $numPack; $i++) {
+                                $rn();
+                            }
+                        } elseif ($pid === 0x0A) { // kCRC
+                            $bits = $vec2($numPack);
+                            $rbytes(4 * count(array_filter($bits)));
+                        } else {
+                            $sz = $rn();
+                            $rbytes($sz);
+                        }
+                    }
+                } elseif ($sid === 0x07) { // kUnpackInfo
+                    $id2 = $rb();
+                    if ($id2 !== 0x0B) {
+                        $ok = false;
+                        break;
+                    }
+                    $numFolders = $rn();
+                    if ($rb()) { // External
+                        cd_fail('该 7Z 使用外部文件夹定义，暂不支持在线浏览');
+                    }
+                    for ($f = 0; $f < $numFolders; $f++) {
+                        $numCoders = $rn();
+                        $o = 1; // 实测 7-Zip / libarchive 输出：单输出流；多输出（如 BCJ2）极罕见
+                        for ($c = 0; $c < $numCoders; $c++) {
+                            $cf = $rb();
+                            $rbytes($cf & 0x0F); // CodecId
+                            if ($cf & 0x20) { // PropertiesSize + Properties（实测字段止于此）
+                                $psz = $rn();
+                                $rbytes($psz);
+                            }
+                        }
+                        $folderOuts[] = $o;
+                    }
+                    while ($ok) {
+                        $pid = $rb();
+                        if (!$ok || $pid === 0x00) {
+                            break;
+                        }
+                        if ($pid === 0x0C) { // kCodersUnpackSize
+                            foreach ($folderOuts as $o) {
+                                for ($i = 0; $i < $o; $i++) {
+                                    $outSizes[] = $rn();
+                                }
+                            }
+                        } elseif ($pid === 0x0A) { // kCRC（按 folder）
+                            $bits = $vec2($numFolders);
+                            $rbytes(4 * count(array_filter($bits)));
+                        } else {
+                            $sz = $rn();
+                            $rbytes($sz);
+                        }
+                    }
+                } elseif ($sid === 0x08) { // kSubStreamsInfo
+                    foreach ($folderOuts as $o) {
+                        $numStreams[] = 1;
+                    }
+                    while ($ok) {
+                        $pid = $rb();
+                        if (!$ok || $pid === 0x00) {
+                            break;
+                        }
+                        if ($pid === 0x0D) { // kNumUnpackStream
+                            $numStreams = [];
+                            foreach ($folderOuts as $o) {
+                                $numStreams[] = $rn();
+                            }
+                        } elseif ($pid === 0x09) { // kSize
+                            foreach ($folderOuts as $f => $o) {
+                                $cnt = $numStreams[$f] ?? 1;
+                                if ($cnt <= 0) {
+                                    continue;
+                                }
+                                $sum = 0;
+                                for ($k = 0; $k < $cnt - 1; $k++) {
+                                    $v = $rn();
+                                    $streamSizes[] = $v;
+                                    $sum += $v;
+                                }
+                                $prefix = 0;
+                                for ($i = 0; $i < $f; $i++) {
+                                    $prefix += $folderOuts[$i];
+                                }
+                                $folderSize = $outSizes[$prefix + $o - 1] ?? 0;
+                                $streamSizes[] = max(0, $folderSize - $sum);
+                            }
+                        } elseif ($pid === 0x0A) { // kCRC（按子流）
+                            $total = 0;
+                            foreach ($numStreams as $c) {
+                                $total += max(0, $c);
+                            }
+                            $bits = $vec2($total);
+                            $rbytes(4 * count(array_filter($bits)));
+                        } else {
+                            $sz = $rn();
+                            $rbytes($sz);
+                        }
+                    }
+                } else {
+                    $sz = $rn();
+                    $rbytes($sz);
+                }
+            }
+            continue;
+        }
+        if ($prop === 0x05) { // kFilesInfo
+            $numFiles = $rn();
+            while ($ok) {
+                $pid = $rb();
+                if (!$ok || $pid === 0x00) {
+                    break;
+                }
+                $psz = $rn();
+                $data = $rbytes($psz);
+                if (!$ok) {
+                    break;
+                }
+                if ($pid === 0x0E) { // kEmptyStream
+                    for ($i = 0; $i < $numFiles; $i++) {
+                        $byte = ord($data[$i >> 3] ?? "\0");
+                        $emptyStream[$i] = (($byte >> (7 - ($i & 7))) & 1) === 1;
+                    }
+                } elseif ($pid === 0x0F) { // kEmptyFile（仅空流条目，按顺序）
+                    $k = 0;
+                    for ($i = 0; $i < $numFiles; $i++) {
+                        if (!empty($emptyStream[$i])) {
+                            $byte = ord($data[$k >> 3] ?? "\0");
+                            $emptyFile[$k] = (($byte >> (7 - ($k & 7))) & 1) === 1;
+                            $k++;
+                        }
+                    }
+                } elseif ($pid === 0x11) { // kName（UTF-16LE，\0\0 分隔）
+                    $q = 0;
+                    $external = ord($data[$q] ?? "\0");
+                    $q++;
+                    if ($external === 0) {
+                        $names = [];
+                        $cur = '';
+                        $len = strlen($data);
+                        for (; $q + 1 < $len; $q += 2) {
+                            if ($data[$q] === "\0" && $data[$q + 1] === "\0") {
+                                $names[] = $cur;
+                                $cur = '';
+                                if (count($names) >= $numFiles) {
+                                    break;
+                                }
+                                continue;
+                            }
+                            $cur .= $data[$q] . $data[$q + 1];
+                        }
+                        if (count($names) < $numFiles && $cur !== '') {
+                            $names[] = $cur;
+                        }
+                        foreach ($names as $k => $nm) {
+                            $names[$k] = cd_archive_name((string)@iconv('UTF-16LE', 'UTF-8//IGNORE', $nm));
+                        }
+                    }
+                } elseif ($pid === 0x14) { // kMTime
+                    $q = 0;
+                    $allDef = ord($data[$q] ?? "\0");
+                    $q++;
+                    $external = ord($data[$q] ?? "\0");
+                    $q++;
+                    if ($external === 0) {
+                        $defined = [];
+                        if ($allDef) {
+                            for ($i = 0; $i < $numFiles; $i++) {
+                                $defined[$i] = true;
+                            }
+                        } else {
+                            $need = (int)(($numFiles + 7) >> 3);
+                            for ($i = 0; $i < $numFiles; $i++) {
+                                $byte = ord($data[$q + ($i >> 3)] ?? "\0");
+                                $defined[$i] = (($byte >> (7 - ($i & 7))) & 1) === 1;
+                            }
+                            $q += $need;
+                        }
+                        for ($i = 0; $i < $numFiles; $i++) {
+                            if (empty($defined[$i])) {
+                                $mtimes[$i] = 0;
+                                continue;
+                            }
+                            if ($q + 8 > strlen($data)) {
+                                $mtimes[$i] = 0;
+                                continue;
+                            }
+                            $ft = unpack('P', substr($data, $q, 8))[1];
+                            $q += 8;
+                            $mtimes[$i] = $ft > 116444736000000000 ? (int)intdiv($ft, 10000000) - 11644473600 : 0;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        // 未知顶层属性：按“尺寸 + 内容”跳过
+        $sz = $rn();
+        $rbytes($sz);
+    }
+    if (!$ok) {
+        cd_fail('7Z 头部解析失败（文件可能损坏，或使用了加密/不支持的变体）');
+    }
+    if ($numFiles <= 0) {
+        cd_fail('7Z 内没有任何文件');
+    }
+
+    // 组装条目：空流条目 = 目录或空文件；其余按子流尺寸顺序取
+    $dirs = 0;
+    $files = 0;
+    $uncompressed = 0;
+    $entries = [];
+    $streamIdx = 0;
+    $emptyIdx = 0;
+    for ($i = 0; $i < $numFiles; $i++) {
+        $name = isset($names[$i]) ? (string)$names[$i] : ('file_' . $i);
+        $name = str_replace('\\', '/', $name);
+        $name = preg_replace('#^(?:\./)+#', '', $name);
+        if ($name === '' || $name === '.') {
+            continue;
+        }
+        $isDir = false;
+        $size = 0;
+        if (empty($emptyStream[$i])) { // 有数据流
+            $size = isset($streamSizes[$streamIdx]) ? (int)$streamSizes[$streamIdx] : 0;
+            $streamIdx++;
+            if ($size < 0) {
+                $size = 0;
+            }
+        } else { // 无数据流：目录或空文件
+            $isDir = !(isset($emptyFile[$emptyIdx]) && $emptyFile[$emptyIdx] === true);
+            $emptyIdx++;
+        }
+        $mtime = isset($mtimes[$i]) ? (int)$mtimes[$i] : 0;
+        if ($isDir) {
+            $dirs++;
+            $entries[] = ['name' => rtrim($name, '/') . '/', 'dir' => true, 'size' => 0, 'mtime' => $mtime];
+        } else {
+            $files++;
+            $uncompressed += $size;
+            $entries[] = ['name' => $name, 'dir' => false, 'size' => $size, 'mtime' => $mtime];
+        }
+    }
+    if (!$entries) {
+        cd_fail('7Z 内没有任何文件');
+    }
+    $items = array_slice($entries, 0, 3000);
+    usort($items, function ($a, $b) {
+        if ($a['dir'] !== $b['dir']) {
+            return $a['dir'] ? -1 : 1;
+        }
+        return strnatcasecmp($a['name'], $b['name']);
+    });
+    return [
+        'total' => count($entries),
+        'dirs' => $dirs,
+        'files' => $files,
+        'uncompressed' => $uncompressed,
+        'items' => $items,
+        'truncated' => count($entries) > 3000,
+        'compressed' => 0,
+    ];
+}
+/** ZIP 条目目录（原 ZipArchive 逻辑，供 ziplist 分发复用） */
+function cd_zip_list(string $path): array
+{
     $zip = new ZipArchive();
     if ($zip->open($path) !== true) {
         cd_fail('压缩包无法打开（可能损坏或加密）');
@@ -570,23 +2061,65 @@ if ($action === 'ziplist') {
         }
     }
     $zip->close();
-    // 文件夹优先，其次按名称排序（保持可读性）
     usort($items, function ($a, $b) {
         if ($a['dir'] !== $b['dir']) {
             return $a['dir'] ? -1 : 1;
         }
         return strnatcasecmp($a['name'], $b['name']);
     });
-    cd_ok([
-        'id' => (int)$node['id'],
-        'name' => $node['name'],
+    return [
         'total' => $total,
         'dirs' => $dirs,
         'files' => $files,
         'uncompressed' => $uncompressed,
         'items' => $items,
         'truncated' => $total > $limit,
-    ]);
+        'compressed' => 0,
+    ];
+}
+
+/** 读取压缩包条目目录（浏览用，按格式分发；RAR/7Z/TAR 系为纯 PHP 解析） */
+if ($action === 'ziplist') {
+    cd_require_perm($me, 'preview');
+    $node = cd_get_node($uid, (int)($_GET['id'] ?? 0));
+    $info = cd_archive_guard($node);
+    switch ($info['format']) {
+        case 'zip':
+            $data = cd_zip_list($info['path']);
+            break;
+        case 'rar':
+            $data = cd_rar_list($info['path']);
+            break;
+        case '7z':
+            $data = cd_7z_list($info['path']);
+            break;
+        case 'tar':
+            $data = cd_tar_list($info['path'], null);
+            break;
+        case 'tgz':
+            $data = cd_tar_list($info['path'], 'gz');
+            break;
+        case 'tbz2':
+            $data = cd_tar_list($info['path'], 'bz2');
+            break;
+        default:
+            $data = cd_single_list($info['path'], $info['format'], (string)$node['name']);
+            break;
+    }
+    unset($data['entries']); // RAR 内部条目结构不下发
+    $cap = cd_archive_extract_capability($info['format']);
+    $extra = [];
+    if ($info['format'] === 'rar') {
+        $extra['rarBackend'] = cd_rar_backend();
+        $extra['compressedCount'] = (int)($data['compressed'] ?? 0);
+    }
+    cd_ok(array_merge([
+        'id' => (int)$node['id'],
+        'name' => $node['name'],
+        'format' => $info['format'],
+        'extractMode' => $cap['mode'],
+        'extractNote' => $cap['note'],
+    ], $extra, $data));
 }
 
 /** 解压到当前目录或新建文件夹（需上传权限，解压相当于批量写入文件） */
@@ -605,7 +2138,12 @@ if ($action === 'zipextract') {
         }
     }
     $node = cd_get_node($uid, $id);
-    $path = cd_zip_guard($node);
+    $info = cd_archive_guard($node);
+    if ($info['format'] !== 'zip') {
+        cd_archive_extract($uid, $me, $node, $info, $mode, $parentId);
+        cd_fail('解压流程异常', 500); // 不会到达：cd_archive_extract 内部已输出
+    }
+    $path = $info['path'];
     $zip = new ZipArchive();
     if ($zip->open($path) !== true) {
         cd_fail('压缩包无法打开（可能损坏或加密）');
@@ -651,21 +2189,9 @@ if ($action === 'zipextract') {
     }
 
     $dirMap = [];
-    /** 按需创建（或复用）目录节点，返回目录 id（$parent 为 null 表示网盘根目录） */
-    $ensureDir = function ($parent, string $seg) use ($uid, $db, $now, &$dirMap): int {
-        $clean = cd_zip_seg($seg);
-        $key = ($parent ?? 0) . '|' . mb_strtolower($clean);
-        if (isset($dirMap[$key])) {
-            return $dirMap[$key];
-        }
-        $parentIdForInsert = $parent === null ? null : (int)$parent;
-        $final = cd_unique_name($uid, $parentIdForInsert, $clean, true);
-        $db->prepare('INSERT INTO cd_nodes (owner_id, parent_id, name, is_dir, size, created_at, updated_at)
-                      VALUES (?,?,?,1,0,?,?)')
-            ->execute([$uid, $parentIdForInsert, $final, $now, $now]);
-        $id = (int)$db->lastInsertId();
-        $dirMap[$key] = $id;
-        return $id;
+    // 目录节点创建统一走共享实现（与 RAR/TAR 解压一致）
+    $ensureDir = function ($parent, string $seg) use ($uid, &$dirMap): int {
+        return cd_archive_ensure_dir($uid, $parent, $seg, $dirMap);
     };
 
     $storageDir = CD_UPLOAD_DIR . DIRECTORY_SEPARATOR . 'u' . $uid;
@@ -879,6 +2405,351 @@ if ($action === 'zipcreate') {
     $newId = (int)$db->lastInsertId();
     cd_log($uid, 'zipcreate', $final . ' items=' . $cnt . ' size=' . $size);
     cd_ok(['id' => $newId, 'name' => $final, 'size' => $size, 'items' => $cnt]);
+}
+
+/* ========== 非 ZIP 格式的解压实现 ========== */
+
+/** 按格式分派解压（zip 由 zipextract 主流程处理） */
+function cd_archive_extract(int $uid, array $me, array $node, array $info, string $mode, ?int $parentId): void
+{
+    switch ($info['format']) {
+        case 'rar':
+            cd_rar_extract($uid, $me, $node, $info['path'], $mode, $parentId);
+            return;
+        case 'tar':
+        case 'tgz':
+        case 'tbz2':
+            cd_tar_extract($uid, $me, $node, $info, $mode, $parentId);
+            return;
+        case 'gz':
+        case 'bz2':
+            cd_single_extract($uid, $me, $node, $info, $parentId);
+            return;
+        default:
+            cd_fail('7Z 暂不支持在线解压：请下载后用 7-Zip / WinRAR 解压（浏览内容不受影响）');
+    }
+}
+
+/**
+ * RAR 解压：服务器有 rar 扩展/命令行组件时完整解压（含压缩与固实压缩包）；
+ * 纯 PHP 环境仅还原“存储（不压缩）”条目，其余条目跳过并回报数量。
+ */
+function cd_rar_extract(int $uid, array $me, array $node, string $path, string $mode, ?int $parentId): void
+{
+    $list = cd_rar_list($path);
+    $entries = $list['entries'];
+    $total = count($entries);
+    if ($total > CD_ZIP_MAX_ENTRIES) {
+        cd_fail('压缩包条目过多（' . $total . ' 项），超过 ' . CD_ZIP_MAX_ENTRIES . ' 项上限');
+    }
+    $need = 0;
+    foreach ($entries as $e) {
+        if (!$e['dir']) {
+            $need += $e['size'];
+        }
+    }
+    if ($need > CD_ZIP_MAX_UNCOMPRESS) {
+        cd_fail('解压体积约 ' . round($need / 1073741824, 1) . ' GB，超过单次 4GB 上限');
+    }
+    $quota = (int)$me['quota_bytes'];
+    $used = cd_used_bytes($uid);
+    if ($used + $need > $quota) {
+        cd_fail('解压后超出存储配额（需约 ' . round($need / 1048576, 1) . ' MB，剩余 '
+            . round(max(0, $quota - $used) / 1048576, 1) . ' MB）');
+    }
+    [$rootDir, $rootName] = cd_archive_root($uid, $parentId, $mode, (string)$node['name']);
+    $st = ['files' => 0, 'skipped' => 0, 'bytes' => 0];
+    $dirMap = [];
+
+    // ① 组件可用：整体解到临时目录再导入（支持压缩/固实 RAR）
+    $backend = cd_rar_backend();
+    if ($backend === 'pecl' || $backend === 'cli') {
+        $tmp = CD_TMP_DIR . DIRECTORY_SEPARATOR . 'rarx_' . cd_random_hex(8);
+        @mkdir($tmp, 0700, true);
+        $err = $backend === 'cli'
+            ? cd_rar_cli_extract($uid, (string)$node['storage_name'], $tmp)
+            : cd_pecl_rar_extract($path, $tmp);
+        if ($err === '' && cd_dir_has_files($tmp)) {
+            try {
+                cd_archive_import_dir($uid, $rootDir, $tmp, $quota, $used, $st, $dirMap);
+            } catch (Throwable $ex) {
+                cd_rrmdir($tmp);
+                cd_fail($ex->getMessage());
+            }
+            cd_rrmdir($tmp);
+            cd_log($uid, 'zipextract', $node['name'] . ' format=rar backend=' . $backend . ' files=' . $st['files']);
+            cd_ok([
+                'files' => $st['files'], 'skipped' => $st['skipped'], 'bytes' => $st['bytes'],
+                'mode' => $mode, 'folder' => $rootName, 'folderId' => $rootDir,
+            ]);
+        }
+        cd_rrmdir($tmp); // 组件失败：回退纯 PHP 路径
+    }
+
+    // ② 纯 PHP：仅“存储（不压缩）”条目可直接还原
+    $fh = @fopen($path, 'rb');
+    if (!$fh) {
+        cd_fail('压缩包无法打开');
+    }
+    $storageDir = CD_UPLOAD_DIR . DIRECTORY_SEPARATOR . 'u' . $uid;
+    if (!is_dir($storageDir)) {
+        @mkdir($storageDir, 0700, true);
+    }
+    foreach ($entries as $e) {
+        $name = str_replace('\\', '/', $e['name']);
+        $trim = rtrim($name, '/');
+        if ($trim === '') {
+            continue;
+        }
+        if ($trim === '__MACOSX' || str_starts_with($trim, '__MACOSX/')) {
+            $st['skipped']++;
+            continue;
+        }
+        $segs = array_values(array_filter(explode('/', $trim), function ($x) {
+            return $x !== '' && $x !== '.';
+        }));
+        if (!$segs || in_array('..', $segs, true)) {
+            $st['skipped']++;
+            continue;
+        }
+        $cur = $rootDir;
+        $last = count($segs) - 1;
+        foreach ($segs as $k => $seg) {
+            if ($k < $last || $e['dir']) {
+                $cur = cd_archive_ensure_dir($uid, $cur, $seg, $dirMap);
+                continue;
+            }
+            if (!($e['store'] && !$e['enc'] && !$e['split']) || $e['packed'] <= 0) {
+                $st['skipped']++; // 压缩/加密/分卷条目：纯 PHP 无法还原
+                break;
+            }
+            $clean = cd_zip_seg($seg);
+            $ext = strtolower(pathinfo($clean, PATHINFO_EXTENSION));
+            $ext = preg_match('/^[a-z0-9]{1,10}$/', $ext) ? $ext : '';
+            $storageName = cd_random_hex(8) . '.' . ($ext !== '' ? $ext : 'bin');
+            $dstPath = cd_storage_path($uid, $storageName);
+            fseek($fh, $e['offset']);
+            $out = @fopen($dstPath, 'wb');
+            if (!$out) {
+                $st['skipped']++;
+                break;
+            }
+            $remain = (int)$e['packed'];
+            $copyOk = true;
+            while ($remain > 0) {
+                $buf = fread($fh, min($remain, 524288));
+                if ($buf === false || $buf === '') {
+                    $copyOk = false;
+                    break;
+                }
+                if (fwrite($out, $buf) === false) {
+                    $copyOk = false;
+                    break;
+                }
+                $remain -= strlen($buf);
+            }
+            fclose($out);
+            if (!$copyOk) {
+                @unlink($dstPath);
+                $st['skipped']++;
+                break;
+            }
+            if ($used + $st['bytes'] + (int)$e['packed'] > $quota) {
+                @unlink($dstPath);
+                fclose($fh);
+                cd_fail('解压中途超出存储配额，已保留已解压部分');
+            }
+            $final = cd_unique_name($uid, $cur, $clean, false);
+            $mime = mime_content_type($dstPath) ?: 'application/octet-stream';
+            $now = date('Y-m-d H:i:s');
+            cd_db()->prepare('INSERT INTO cd_nodes (owner_id, parent_id, name, is_dir, size, mime, storage_name, created_at, updated_at)
+                              VALUES (?,?,?,0,?,?,?,?,?)')
+                ->execute([$uid, $cur, $final, (int)$e['packed'], $mime, $storageName, $now, $now]);
+            $st['files']++;
+            $st['bytes'] += (int)$e['packed'];
+            break;
+        }
+    }
+    fclose($fh);
+    cd_log($uid, 'zipextract', $node['name'] . ' format=rar backend=basic files=' . $st['files'] . ' skipped=' . $st['skipped']);
+    cd_ok([
+        'files' => $st['files'], 'skipped' => $st['skipped'], 'bytes' => $st['bytes'],
+        'mode' => $mode, 'folder' => $rootName, 'folderId' => $rootDir,
+    ]);
+}
+
+/** TAR / TAR.GZ / TAR.BZ2 完整解压（纯 PHP 流式） */
+function cd_tar_extract(int $uid, array $me, array $node, array $info, string $mode, ?int $parentId): void
+{
+    $comp = $info['format'] === 'tgz' ? 'gz' : ($info['format'] === 'tbz2' ? 'bz2' : null);
+    $list = cd_tar_list($info['path'], $comp);
+    if ($list['uncompressed'] > CD_ZIP_MAX_UNCOMPRESS) {
+        cd_fail('解压体积约 ' . round($list['uncompressed'] / 1073741824, 1) . ' GB，超过单次 4GB 上限');
+    }
+    if ($list['total'] > CD_ZIP_MAX_ENTRIES) {
+        cd_fail('条目过多（' . $list['total'] . ' 项），超过 ' . CD_ZIP_MAX_ENTRIES . ' 项上限');
+    }
+    $quota = (int)$me['quota_bytes'];
+    $used = cd_used_bytes($uid);
+    if ($used + $list['uncompressed'] > $quota) {
+        cd_fail('解压后超出存储配额（需约 ' . round($list['uncompressed'] / 1048576, 1) . ' MB，剩余 '
+            . round(max(0, $quota - $used) / 1048576, 1) . ' MB）');
+    }
+    [$rootDir, $rootName] = cd_archive_root($uid, $parentId, $mode, (string)$node['name']);
+    $dirMap = [];
+    $st = ['files' => 0, 'skipped' => 0, 'bytes' => 0];
+    $storageDir = CD_UPLOAD_DIR . DIRECTORY_SEPARATOR . 'u' . $uid;
+    if (!is_dir($storageDir)) {
+        @mkdir($storageDir, 0700, true);
+    }
+    try {
+        cd_tar_walk($info['path'], $comp, function (string $name, bool $isDir, int $size, int $mtime, $reader) use ($uid, $rootDir, $quota, $used, &$st, &$dirMap) {
+            if ($st['files'] >= CD_ZIP_MAX_ENTRIES) {
+                return false;
+            }
+            $trim = rtrim(preg_replace('#^(?:\./)+#', '', $name), '/');
+            if ($trim === '' || $trim === '.') {
+                return true;
+            }
+            if ($trim === '__MACOSX' || str_starts_with($trim, '__MACOSX/')) {
+                return true;
+            }
+            $segs = array_values(array_filter(explode('/', $trim), function ($x) {
+                return $x !== '' && $x !== '.';
+            }));
+            if (!$segs || in_array('..', $segs, true)) {
+                return true;
+            }
+            $cur = $rootDir;
+            $last = count($segs) - 1;
+            foreach ($segs as $k => $seg) {
+                if ($k < $last || $isDir) {
+                    $cur = cd_archive_ensure_dir($uid, $cur, $seg, $dirMap);
+                    continue;
+                }
+                $clean = cd_zip_seg($seg);
+                if ($size <= 0) {
+                    $st['skipped']++; // 空文件不入库（与 ZIP 解压口径一致）
+                    return true;
+                }
+                $ext = strtolower(pathinfo($clean, PATHINFO_EXTENSION));
+                $ext = preg_match('/^[a-z0-9]{1,10}$/', $ext) ? $ext : '';
+                $storageName = cd_random_hex(8) . '.' . ($ext !== '' ? $ext : 'bin');
+                $dstPath = cd_storage_path($uid, $storageName);
+                $out = @fopen($dstPath, 'wb');
+                if (!$out) {
+                    $st['skipped']++;
+                    return true;
+                }
+                $written = 0;
+                while ($written < $size) {
+                    $buf = $reader(min(524288, $size - $written));
+                    if ($buf === '') {
+                        break;
+                    }
+                    if (fwrite($out, $buf) === false) {
+                        break;
+                    }
+                    $written += strlen($buf);
+                }
+                fclose($out);
+                if ($written !== $size) {
+                    @unlink($dstPath);
+                    $st['skipped']++;
+                    return true;
+                }
+                if ($used + $st['bytes'] + $size > $quota) {
+                    @unlink($dstPath);
+                    throw new RuntimeException('解压中途超出存储配额，已保留已解压部分');
+                }
+                $final = cd_unique_name($uid, $cur, $clean, false);
+                $mime = mime_content_type($dstPath) ?: 'application/octet-stream';
+                $now = date('Y-m-d H:i:s');
+                cd_db()->prepare('INSERT INTO cd_nodes (owner_id, parent_id, name, is_dir, size, mime, storage_name, created_at, updated_at)
+                                  VALUES (?,?,?,0,?,?,?,?,?)')
+                    ->execute([$uid, $cur, $final, $size, $mime, $storageName, $now, $now]);
+                $st['files']++;
+                $st['bytes'] += $size;
+                return true;
+            }
+            return true;
+        });
+    } catch (Throwable $ex) {
+        cd_fail($ex->getMessage());
+    }
+    cd_log($uid, 'zipextract', $node['name'] . ' format=' . $info['format'] . ' files=' . $st['files'] . ' skipped=' . $st['skipped']);
+    cd_ok([
+        'files' => $st['files'], 'skipped' => $st['skipped'], 'bytes' => $st['bytes'],
+        'mode' => $mode, 'folder' => $rootName, 'folderId' => $rootDir,
+    ]);
+}
+
+/** 单文件 GZ / BZ2 解压为当前目录里的一个文件 */
+function cd_single_extract(int $uid, array $me, array $node, array $info, ?int $parentId): void
+{
+    $quota = (int)$me['quota_bytes'];
+    $used = cd_used_bytes($uid);
+    $base = preg_replace('/\.(gz|bz2)$/i', '', (string)$node['name']);
+    $clean = cd_zip_seg(($base === '' || $base === null) ? '解压文件' : $base);
+    $storageDir = CD_UPLOAD_DIR . DIRECTORY_SEPARATOR . 'u' . $uid;
+    if (!is_dir($storageDir)) {
+        @mkdir($storageDir, 0700, true);
+    }
+    $ext = strtolower(pathinfo($clean, PATHINFO_EXTENSION));
+    $ext = preg_match('/^[a-z0-9]{1,10}$/', $ext) ? $ext : '';
+    $storageName = cd_random_hex(8) . '.' . ($ext !== '' ? $ext : 'bin');
+    $dstPath = cd_storage_path($uid, $storageName);
+    if ($info['format'] === 'gz') {
+        $in = @gzopen($info['path'], 'rb');
+    } else {
+        $in = @bzopen($info['path'], 'r');
+    }
+    if (!$in) {
+        cd_fail('压缩文件无法打开（可能已损坏）');
+    }
+    $out = @fopen($dstPath, 'wb');
+    if (!$out) {
+        $info['format'] === 'gz' ? @gzclose($in) : @bzclose($in);
+        cd_fail('写入临时文件失败（磁盘空间或权限问题）');
+    }
+    $bytes = 0;
+    $ok = true;
+    while (true) {
+        $buf = $info['format'] === 'gz' ? @gzread($in, 262144) : @bzread($in, 262144);
+        if ($buf === false) {
+            $ok = false;
+            break;
+        }
+        if ($buf === '') {
+            break;
+        }
+        if (fwrite($out, $buf) === false) {
+            $ok = false;
+            break;
+        }
+        $bytes += strlen($buf);
+        if ($used + $bytes > $quota) {
+            $ok = false;
+            break;
+        }
+    }
+    $info['format'] === 'gz' ? @gzclose($in) : @bzclose($in);
+    fclose($out);
+    if (!$ok || $bytes <= 0) {
+        @unlink($dstPath);
+        cd_fail('解压失败：文件可能已损坏，或解压后超出存储配额');
+    }
+    $final = cd_unique_name($uid, $parentId, $clean, false);
+    $mime = mime_content_type($dstPath) ?: 'application/octet-stream';
+    $now = date('Y-m-d H:i:s');
+    cd_db()->prepare('INSERT INTO cd_nodes (owner_id, parent_id, name, is_dir, size, mime, storage_name, created_at, updated_at)
+                      VALUES (?,?,?,0,?,?,?,?,?)')
+        ->execute([$uid, $parentId, $final, $bytes, $mime, $storageName, $now, $now]);
+    cd_log($uid, 'zipextract', $node['name'] . ' format=' . $info['format'] . ' bytes=' . $bytes);
+    cd_ok([
+        'files' => 1, 'skipped' => 0, 'bytes' => $bytes,
+        'mode' => 'here', 'folder' => null, 'folderId' => $parentId,
+    ]);
 }
 
 if ($action === 'rename') {
@@ -1203,8 +3074,9 @@ if ($action === 'stats') {
             'application/vnd.ms-powerpoint',
             'application/vnd.openxmlformats-officedocument.presentationml.presentation',
             'text/plain', 'text/html', 'text/markdown', 'text/csv', 'text/x-php'], true)) return '文档';
-        if (in_array($m, ['application/zip', 'application/x-rar-compressed', 'application/x-7z-compressed',
-            'application/gzip', 'application/x-tar'], true)) return '压缩包';
+        if (in_array($m, ['application/zip', 'application/x-rar-compressed', 'application/vnd.rar',
+            'application/x-rar', 'application/x-7z-compressed', 'application/x-compressed-tar',
+            'application/gzip', 'application/x-gzip', 'application/x-bzip2', 'application/x-tar'], true)) return '压缩包';
         return '其他';
     };
     foreach ($st->fetchAll() as $r) {
